@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <style>
+      body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+      .container { width: 90%; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9; }
+      .header { padding: 10px 20px; background-color: #01e890; color: #00434B; text-align: center; border-radius: 5px 5px 0 0; }
+      .content { padding: 20px; }
+      .details-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+      .details-table th, .details-table td { padding: 8px; border: 1px solid #ddd; text-align: left; }
+      .details-table th { background-color: #f2f2f2; }
+      .footer { margin-top: 20px; font-size: 0.9em; color: #777; text-align: center; }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <div class="header">
+        <h2>Absence Request Submitted</h2>
+      </div>
+      <div class="content">
+        <p>Dear <?= staffName ?>,</p>
+        <p><?= infoMessage ?></p>
+        <p><strong>Your request details:</strong></p>
+        <table class="details-table">
+          <tr>
+            <th>Absence Type</th>
+            <td><?= absenceType ?></td>
+          </tr>
+          <tr>
+            <th>Start Date & Time</th>
+            <td><?= formattedStart ?></td>
+          </tr>
+          <tr>
+            <th>End Date & Time</th>
+            <td><?= formattedEnd ?></td>
+          </tr>
+          <? if (typeof durationForEmail !== 'undefined' && durationForEmail) { ?>
+          <tr>
+            <th>Calculated Duration</th>
+            <td><?= durationForEmail ?></td>
+          </tr>
+          <? } ?>
+           <tr>
+            <th>Reason Provided</th>
+            <td><?= reason ?></td>
+          </tr>
+          <? if (typeof payStatus !== 'undefined' && payStatus) { ?>
+          <tr>
+            <th>Pay Status</th>
+            <td><?= payStatus ?></td>
+          </tr>
+          <? } ?>
+        </table>
+        <p><?= actionMessage ?></p>
+        <p>Thank you.</p>
+      </div>
+      <div class="footer">
+        <p>This is an automated message. Please do not reply to this email.</p>
+      </div>
+    </div>
+  </body>
+</html> 
