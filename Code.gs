@@ -1882,9 +1882,8 @@ function _findQuestionByTitle(form, title) {
 
 /**
  * Archives old, completed requests from the main log to an archive sheet.
- * This helps keep the main log clean and performant.
- * A request is considered archivable if it has a final status (not 'Pending Approval')
- * and its timestamp is older than the configured number of days.
+ * This version includes UI prompts and is intended for manual execution.
+ * Use this when running manually from the menu or script editor.
  */
 function archiveOldRequests() {
   const ui = SpreadsheetApp.getUi();
@@ -1900,96 +1899,211 @@ function archiveOldRequests() {
   }
 
   try {
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
-    const logSheet = ss.getSheetByName(REQUEST_LOG_SHEET_NAME);
-    if (!logSheet) throw new Error(`Log sheet "${REQUEST_LOG_SHEET_NAME}" not found.`);
-
-    let archiveSheet = ss.getSheetByName(ARCHIVE_SHEET_NAME);
-    if (!archiveSheet) {
-      archiveSheet = ss.insertSheet(ARCHIVE_SHEET_NAME);
-      const headers = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues();
-      archiveSheet.getRange(1, 1, 1, headers[0].length).setValues(headers);
-      archiveSheet.setFrozenRows(1);
-      Logger.log(`Created archive sheet: "${ARCHIVE_SHEET_NAME}"`);
-    } else {
-      // Ensure archive sheet has the same column structure as the log sheet
-      const logHeaders = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
-      const archiveHeaders = archiveSheet.getRange(1, 1, 1, archiveSheet.getLastColumn()).getValues()[0];
-      
-      // If column counts don't match, update the archive sheet headers
-      if (logHeaders.length !== archiveHeaders.length) {
-        archiveSheet.getRange(1, 1, 1, logHeaders.length).setValues([logHeaders]);
-        Logger.log(`Updated archive sheet headers to match log sheet (${logHeaders.length} columns)`);
-      }
-    }
-
-    const logIndices = getColumnIndices(logSheet, REQUEST_LOG_SHEET_NAME);
-    if (!logIndices) throw new Error(`Could not get column indices for "${REQUEST_LOG_SHEET_NAME}".`);
-
-    const requiredArchiveHeaders = [HEADER_LOG_ABSENCE_START_DATE, HEADER_LOG_APPROVAL_STATUS];
-    if (!validateRequiredHeaders(logIndices, requiredArchiveHeaders, REQUEST_LOG_SHEET_NAME)) {
-      throw new Error("Missing required headers for archiving.");
-    }
-    
-    const absenceStartDateColIdx = logIndices[HEADER_LOG_ABSENCE_START_DATE.toLowerCase()] - 1;
-    const statusColIdx = logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()] - 1;
-
-    const lastRow = logSheet.getLastRow();
-    if (lastRow < 2) {
-      ui.alert('No Data', 'The log sheet has no data to archive.', ui.ButtonSet.OK);
-      return;
-    }
-
-    // Get ALL data from the log sheet (all columns)
-    const dataRange = logSheet.getRange(2, 1, lastRow - 1, logSheet.getLastColumn());
-    const allData = dataRange.getValues();
-
-    const archiveThreshold = new Date();
-    archiveThreshold.setDate(archiveThreshold.getDate() - ARCHIVE_OLDER_THAN_DAYS);
-    archiveThreshold.setHours(0, 0, 0, 0);
-
-    const rowsToKeep = [];
-    const rowsToArchive = [];
-
-    allData.forEach(row => {
-      const status = row[statusColIdx] ? String(row[statusColIdx]).trim() : '';
-      const absenceDateVal = row[absenceStartDateColIdx];
-      const absenceDate = combineDateAndTime(absenceDateVal, null); // Use helper to parse date robustly
-
-      const isFinalStatus = status && status !== 'Pending Approval';
-      const isOldEnough = absenceDate && !isNaN(absenceDate) && absenceDate < archiveThreshold;
-
-      if (isFinalStatus && isOldEnough) {
-        rowsToArchive.push(row);
-      } else {
-        rowsToKeep.push(row);
-      }
-    });
-
-    if (rowsToArchive.length > 0) {
-      // Append to archive sheet - ensure we're writing the full width
-      const archiveStartRow = archiveSheet.getLastRow() + 1;
-      const numCols = Math.max(rowsToArchive[0].length, logSheet.getLastColumn());
-      archiveSheet.getRange(archiveStartRow, 1, rowsToArchive.length, numCols).setValues(rowsToArchive);
-      
-      // Clear and rewrite log sheet
-      if (logSheet.getLastRow() > 1) {
-        logSheet.getRange(2, 1, logSheet.getLastRow() - 1, logSheet.getLastColumn()).clearContent();
-      }
-      if (rowsToKeep.length > 0) {
-        const numColsToWrite = Math.max(rowsToKeep[0].length, logSheet.getLastColumn());
-        logSheet.getRange(2, 1, rowsToKeep.length, numColsToWrite).setValues(rowsToKeep);
-      }
-      
-      ui.alert('Archiving Complete', `Successfully archived ${rowsToArchive.length} request(s).`, ui.ButtonSet.OK);
-      Logger.log(`Archived ${rowsToArchive.length} rows with ${numCols} columns each.`);
-    } else {
-      ui.alert('Nothing to Archive', 'No requests met the archiving criteria.', ui.ButtonSet.OK);
-    }
+    const result = _performArchiving();
+    ui.alert('Archiving Complete', result.message, ui.ButtonSet.OK);
+    Logger.log(result.message);
   } catch (error) {
     Logger.log(`ERROR in archiveOldRequests: ${error.message}\nStack: ${error.stack}`);
     notifyAdmin(`Absence Script CRITICAL Failure: Failed to archive old requests. Error: ${error.message}`);
     ui.alert('Archiving Failed', `An error occurred: ${error.message}. Please check the logs.`, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Archives old requests automatically without user prompts.
+ * This version is designed to run on time triggers.
+ * It will archive requests automatically and send email notifications about the results.
+ */
+function archiveOldRequestsAutomatically() {
+  try {
+    Logger.log(`Starting automatic archiving of requests older than ${ARCHIVE_OLDER_THAN_DAYS} days...`);
+    const result = _performArchiving();
+    
+    // Log the result
+    Logger.log(result.message);
+    
+    // Optionally notify admin of successful archiving (only if requests were actually archived)
+    if (result.archivedCount > 0) {
+      notifyAdmin(`Automatic Archiving Complete: ${result.message}`, "Absence System - Automatic Archiving");
+    }
+    
+  } catch (error) {
+    Logger.log(`ERROR in archiveOldRequestsAutomatically: ${error.message}\nStack: ${error.stack}`);
+    notifyAdmin(`Absence Script CRITICAL Failure: Automatic archiving failed. Error: ${error.message}`);
+  }
+}
+
+/**
+ * Core archiving logic that both manual and automatic functions can use.
+ * This function contains no UI elements and returns results that can be handled differently.
+ * @returns {object} Object containing success status, message, and archived count
+ * @private
+ */
+function _performArchiving() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const logSheet = ss.getSheetByName(REQUEST_LOG_SHEET_NAME);
+  if (!logSheet) {
+    throw new Error(`Log sheet "${REQUEST_LOG_SHEET_NAME}" not found.`);
+  }
+
+  let archiveSheet = ss.getSheetByName(ARCHIVE_SHEET_NAME);
+  if (!archiveSheet) {
+    archiveSheet = ss.insertSheet(ARCHIVE_SHEET_NAME);
+    const headers = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues();
+    archiveSheet.getRange(1, 1, 1, headers[0].length).setValues(headers);
+    archiveSheet.setFrozenRows(1);
+    Logger.log(`Created archive sheet: "${ARCHIVE_SHEET_NAME}"`);
+  } else {
+    // Ensure archive sheet has the same column structure as the log sheet
+    const logHeaders = logSheet.getRange(1, 1, 1, logSheet.getLastColumn()).getValues()[0];
+    const archiveHeaders = archiveSheet.getRange(1, 1, 1, archiveSheet.getLastColumn()).getValues()[0];
+    
+    // If column counts don't match, update the archive sheet headers
+    if (logHeaders.length !== archiveHeaders.length) {
+      archiveSheet.getRange(1, 1, 1, logHeaders.length).setValues([logHeaders]);
+      Logger.log(`Updated archive sheet headers to match log sheet (${logHeaders.length} columns)`);
+    }
+  }
+
+  const logIndices = getColumnIndices(logSheet, REQUEST_LOG_SHEET_NAME);
+  if (!logIndices) {
+    throw new Error(`Could not get column indices for "${REQUEST_LOG_SHEET_NAME}".`);
+  }
+
+  const requiredArchiveHeaders = [HEADER_LOG_ABSENCE_START_DATE, HEADER_LOG_APPROVAL_STATUS];
+  if (!validateRequiredHeaders(logIndices, requiredArchiveHeaders, REQUEST_LOG_SHEET_NAME)) {
+    throw new Error("Missing required headers for archiving.");
+  }
+  
+  const absenceStartDateColIdx = logIndices[HEADER_LOG_ABSENCE_START_DATE.toLowerCase()] - 1;
+  const statusColIdx = logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()] - 1;
+
+  const lastRow = logSheet.getLastRow();
+  if (lastRow < 2) {
+    return {
+      success: true,
+      message: 'The log sheet has no data to archive.',
+      archivedCount: 0
+    };
+  }
+
+  // Get ALL data from the log sheet (all columns)
+  const dataRange = logSheet.getRange(2, 1, lastRow - 1, logSheet.getLastColumn());
+  const allData = dataRange.getValues();
+
+  const archiveThreshold = new Date();
+  archiveThreshold.setDate(archiveThreshold.getDate() - ARCHIVE_OLDER_THAN_DAYS);
+  archiveThreshold.setHours(0, 0, 0, 0);
+
+  const rowsToArchive = [];
+
+  // First pass: identify which rows need to be archived
+  allData.forEach((row, index) => {
+    const status = row[statusColIdx] ? String(row[statusColIdx]).trim() : '';
+    const absenceDateVal = row[absenceStartDateColIdx];
+    const absenceDate = combineDateAndTime(absenceDateVal, null); // Use helper to parse date robustly
+
+    const isFinalStatus = status && status !== 'Pending Approval';
+    const isOldEnough = absenceDate && !isNaN(absenceDate) && absenceDate < archiveThreshold;
+
+    if (isFinalStatus && isOldEnough) {
+      rowsToArchive.push({
+        data: row,
+        originalRowIndex: index + 2 // Convert to 1-based row number (accounting for header)
+      });
+    }
+  });
+
+  if (rowsToArchive.length > 0) {
+    // Step 1: Append archived rows to archive sheet
+    const archiveStartRow = archiveSheet.getLastRow() + 1;
+    const rowDataToArchive = rowsToArchive.map(item => item.data);
+    const numCols = Math.max(rowDataToArchive[0].length, logSheet.getLastColumn());
+    archiveSheet.getRange(archiveStartRow, 1, rowDataToArchive.length, numCols).setValues(rowDataToArchive);
+    Logger.log(`Added ${rowDataToArchive.length} rows to archive sheet starting at row ${archiveStartRow}`);
+    
+    // Step 2: Extract row indices and sort them in descending order for deletion
+    const rowIndicesToDelete = rowsToArchive.map(item => item.originalRowIndex);
+    rowIndicesToDelete.sort((a, b) => b - a); // Sort descending (delete from bottom up)
+    
+    Logger.log(`Deleting ${rowIndicesToDelete.length} rows from log sheet: ${rowIndicesToDelete.join(', ')}`);
+    
+    // Step 3: Delete rows from log sheet (from bottom to top to avoid row shifting issues)
+    let deletedCount = 0;
+    rowIndicesToDelete.forEach(rowIndex => {
+      try {
+        logSheet.deleteRow(rowIndex);
+        deletedCount++;
+      } catch (deleteError) {
+        Logger.log(`Warning: Could not delete row ${rowIndex}: ${deleteError.message}`);
+        // Continue with other deletions even if one fails
+      }
+    });
+    
+    const message = `Successfully archived ${rowDataToArchive.length} request(s) and deleted ${deletedCount} rows from the log sheet.`;
+    Logger.log(`Archived ${rowDataToArchive.length} rows with ${numCols} columns each and deleted ${deletedCount} corresponding rows from log sheet.`);
+    
+    return {
+      success: true,
+      message: message,
+      archivedCount: rowDataToArchive.length
+    };
+  } else {
+    return {
+      success: true,
+      message: 'No requests met the archiving criteria.',
+      archivedCount: 0
+    };
+  }
+}
+
+/**
+ * Sets up a time-driven trigger to run automatic archiving daily.
+ * Run this function once to install the trigger.
+ */
+function setupAutomaticArchivingTrigger() {
+  // Delete any existing archiving triggers first
+  const triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(trigger => {
+    if (trigger.getHandlerFunction() === 'archiveOldRequestsAutomatically') {
+      ScriptApp.deleteTrigger(trigger);
+      Logger.log('Deleted existing automatic archiving trigger');
+    }
+  });
+
+  // Create new daily trigger at 2 AM
+  ScriptApp.newTrigger('archiveOldRequestsAutomatically')
+    .timeBased()
+    .everyDays(1)
+    .atHour(2) // 2 AM
+    .create();
+    
+  Logger.log('Created automatic archiving trigger to run daily at 2 AM');
+  
+  // Optionally notify admin
+  notifyAdmin('Automatic archiving trigger has been set up to run daily at 2 AM', 'Absence System - Trigger Setup');
+}
+
+/**
+ * Removes the automatic archiving trigger.
+ * Run this function if you want to disable automatic archiving.
+ */
+function removeAutomaticArchivingTrigger() {
+  const triggers = ScriptApp.getProjectTriggers();
+  let removed = 0;
+  
+  triggers.forEach(trigger => {
+    if (trigger.getHandlerFunction() === 'archiveOldRequestsAutomatically') {
+      ScriptApp.deleteTrigger(trigger);
+      removed++;
+    }
+  });
+  
+  if (removed > 0) {
+    Logger.log(`Removed ${removed} automatic archiving trigger(s)`);
+    notifyAdmin(`Removed ${removed} automatic archiving trigger(s)`, 'Absence System - Trigger Removed');
+  } else {
+    Logger.log('No automatic archiving triggers found to remove');
   }
 }
 
@@ -2066,6 +2180,9 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('Admin Absence Tools')
     .addItem('Update Admin Form Staff List', 'updateAdminFormStaffList')
     .addItem('Flush Column Indices Cache', 'flushColumnIndexCache')
-    .addItem('Archive Old Requests', 'archiveOldRequests')
+    .addSeparator()
+    .addItem('Archive Old Requests (Manual)', 'archiveOldRequests')
+    .addItem('Setup Automatic Archiving', 'setupAutomaticArchivingTrigger')
+    .addItem('Remove Automatic Archiving', 'removeAutomaticArchivingTrigger')
     .addToUi();
 }
