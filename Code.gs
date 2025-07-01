@@ -13,11 +13,13 @@
 // --- General Configuration ---
 const HEADTEACHER_EMAIL        = "kmontiel.staff@sidneystringeracademy.org.uk"; // REPLACE: Headteacher's actual email address.
 const ADMIN_EMAIL_FOR_ERRORS   = "kmontiel.staff@sidneystringeracademy.org.uk"; // Optional: Email for critical error notifications.
-const SENDER_EMAIL             = ""; // IMPORTANT: If set, this will be the "from" address on all emails. It MUST be a configured alias for the user running the script.
-const SENDER_NAME              = "Absence Request System";     // The name that appears as the sender (e.g., "School Office").
+const SENDER_EMAIL             = "absencerequests@sidneystringeracademy.org.uk"; // IMPORTANT: If set, this will be the "from" address on all emails. It MUST be a configured alias for the user running the script.
+const SENDER_NAME              = "Absence Request System";     // The name that appears as the sender.
 const TARGET_CALENDAR_ID       = "c_860cc463977d96c5225672c0d56a6f7585aaa64ddd3c1170a1f71e80c929425f@group.calendar.google.com"; // Specific calendar for absence events.
 const ADMIN_FORM_ID            = "1XRwmIU4n4muXoq10-GLAb8M4RZLa8pKD2V0em96-sLM"; // For use in populating email dropdown
+const STAFF_FORM_ID            = "1D2CQuaqKizLMHotOn73SjHF9eg1w-1AfS3ea0ZvlEsc"; // Staff-facing absence request form.
 const HEADER_ADMIN_NOTIFY_HT   = "Notify Headteacher?";        // The exact question text for the HT notification option on the admin form.
+const WEB_APP_URL              = "https://script.google.com/a/macros/sidneystringeracademy.org.uk/s/AKfycbz9PhI-2hp7_msExyJ-uIljjbIT_G---k4Z8j2A8sgYdUuuSzPaR9UDbSFI-XD7UbTs/exec";
 
 // --- Sheet Configuration ---
 const REQUEST_LOG_SHEET_NAME   = "Staff Absence Requests Log"; // Name of the master response sheet.
@@ -78,6 +80,8 @@ const HEADER_LOG_DURATION_HOURS         = "Duration (Hours)";     // Calculated 
 const HEADER_LOG_APPROVER_COMMENT       = "Approver Comment";     // Approver's optional comment.
 const HEADER_LOG_START_DATETIME         = "Start Date/Time";      // Programmatically combined start date/time.
 const HEADER_LOG_END_DATETIME           = "End Date/Time";        // Programmatically combined end date/time.
+const HEADER_BROMCOM_ENTRY              = "Bromcom Entry";        // Populated when staff enter onto Bromcom
+const HEADER_ENTRY_TIMESTAMP            = "Entry Timestamp";      // Programmatically updated onEdit of Bromcom Entry
 
 // --- Header Names in "Absence History" Sheet (Used for READING historical data) ---
 const HEADER_HIST_STAFF_EMAIL           = "EmailAddress";     // Email of the staff member in the history record.
@@ -89,7 +93,7 @@ const HEADER_HIST_DURATION_DAYS         = "DfE Duration";     // Duration in Day
 const HEADER_HIST_DATE_APPROVED         = "Date Approved";    // Date Approved (Optional for reading from history).
 
 // --- Archiving Configuration ---
-const ARCHIVE_OLDER_THAN_DAYS  = 1; // Archive requests older than this many days.
+const ARCHIVE_OLDER_THAN_DAYS  = 6; // Archive requests older than this many days.
 
 // --- Deployment Note ---
 // This script relies on the Web App being deployed with:
@@ -274,11 +278,11 @@ function _onFormSubmitHandler(rowData, rowIndex, requestSheet, sourceOptions) {
       return;
     }
 
-    const webAppUrl = ScriptApp.getService().getUrl();
+    const webAppUrl = WEB_APP_URL;
     if (sourceOptions.requiresApproval && !webAppUrl) {
-      Logger.log("ERROR: Script must be deployed as Web App for approval links to work.");
-      notifyAdmin("Absence Script ERROR: Not deployed as Web App. Approval links cannot be generated.");
-      requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()]).setValue('Error - Deploy Script as Web App');
+      Logger.log("ERROR: WEB_APP_URL constant is not set. Approval links cannot be generated.");
+      notifyAdmin("Absence Script ERROR: WEB_APP_URL constant is not set. Approval links cannot be generated.");
+      requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()]).setValue('Error - Configure WEB_APP_URL');
       lock.releaseLock();
       return;
     }
@@ -366,9 +370,9 @@ function doGet(e) {
     }
 
     // If the comment form hasn't been submitted yet, show it.
+    const webAppUrl = WEB_APP_URL
     if (!isCommentProvided) {
       Logger.log(`Comment not provided for action ${action}, row ${rowIndex}. Displaying comment prompt page.`);
-      const webAppUrl = ScriptApp.getService().getUrl();
       return createCommentPromptPage(action, rowIndex, decodedApprover, webAppUrl);
     }
 
@@ -490,11 +494,8 @@ function doGet(e) {
           subject: requesterSubject,
           htmlBody: htmlRequesterBody
         };
-        if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-            mailOptions.from = SENDER_EMAIL;
-            mailOptions.name = SENDER_NAME;
-        }
-        MailApp.sendEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions);
+
         Logger.log(`Sent HTML decision notification ('${decisionText}') to requester ${requesterEmail} for row ${rowIndex}. Comment included: ${!!commentParam}`);
         message += `\n\nThe staff member (${requesterEmail}) has been notified.`;
       } else {
@@ -635,11 +636,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: 'Absence Request Invalid: Start Date Too Far In Past',
             htmlBody: htmlBody
         };
-        if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-            mailOptions.from = SENDER_EMAIL;
-            mailOptions.name = SENDER_NAME;
-        }
-        MailApp.sendEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions);
       }
       Logger.log(`Row ${rowIndex}: ${errorMessage}`);
       return;
@@ -664,11 +661,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: 'Absence Request Invalid: Start Date Too Far In Future',
             htmlBody: htmlBody
         };
-        if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-            mailOptions.from = SENDER_EMAIL;
-            mailOptions.name = SENDER_NAME;
-        }
-        MailApp.sendEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions);
       }
       Logger.log(`Row ${rowIndex}: ${errorMessage}`);
       return;
@@ -712,11 +705,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
                 subject: 'Absence Request Invalid: Non-working Day',
                 htmlBody: htmlBody
             };
-            if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-                mailOptions.from = SENDER_EMAIL;
-                mailOptions.name = SENDER_NAME;
-            }
-            MailApp.sendEmail(mailOptions);
+            _sendConfiguredEmail(mailOptions);
         }
         Logger.log(`Row ${rowIndex}: ${errorMessage}`);
         return;
@@ -737,11 +726,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: 'Absence Request Invalid: End date/time is before start date/time',
             htmlBody: htmlBody
         };
-        if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-            mailOptions.from = SENDER_EMAIL;
-            mailOptions.name = SENDER_NAME;
-        }
-        MailApp.sendEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions);
       }
       Logger.log(`Row ${rowIndex}: End date/time (${endDateTime}) is before start date/time (${startDateTime}).`);
       return;
@@ -762,11 +747,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: 'Absence Request Invalid: Zero-Length Absence',
             htmlBody: htmlBody
         };
-        if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-            mailOptions.from = SENDER_EMAIL;
-            mailOptions.name = SENDER_NAME;
-        }
-        MailApp.sendEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions);
       }
       Logger.log(`Row ${rowIndex}: ${errorMessage}`);
       return;
@@ -806,11 +787,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: 'Absence Request Invalid: Overlapping Absence Detected',
             htmlBody: htmlBody.replace(/\n/g, '<br>') // For the list of overlaps
         };
-        if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-            mailOptions.from = SENDER_EMAIL;
-            mailOptions.name = SENDER_NAME;
-        }
-        MailApp.sendEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions);
       }
       Logger.log(`Row ${rowIndex}: Overlapping request(s) found. Details: ${summaryText}`);
       return;
@@ -910,11 +887,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: `Absence Logged (Info Only): ${staffDisplayName}`,
             htmlBody: htmlBody
           };
-          if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-              mailOptions.from = SENDER_EMAIL;
-              mailOptions.name = SENDER_NAME;
-          }
-          MailApp.sendEmail(mailOptions);
+          _sendConfiguredEmail(mailOptions);
 
           if (logIndices[HEADER_LOG_LM_NOTIFIED.toLowerCase()]) requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_LM_NOTIFIED.toLowerCase()]).setValue(now).setNumberFormat(timestampFormat);
         } catch (errLm) { Logger.log(`Row ${rowIndex}: ERROR sending admin-logged LM email: ${errLm.message}`); }
@@ -941,11 +914,8 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: `Absence Logged on Your Behalf (${formattedStartDate})`,
             htmlBody: htmlBody
           };
-          if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-              mailOptions.from = SENDER_EMAIL;
-              mailOptions.name = SENDER_NAME;
-          }
-          MailApp.sendEmail(mailOptions);
+          _sendConfiguredEmail(mailOptions);
+          
           Logger.log(`Row ${rowIndex}: Sent admin-logged submission confirmation to staff member ${submitterEmail}.`);
         } catch (errStaff) {
           Logger.log(`Row ${rowIndex}: ERROR sending admin-logged staff confirmation email: ${errStaff.message}`);
@@ -1009,11 +979,8 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
       emailOptionsForHT.htmlBody = template.evaluate().getContent();
 
       try {
-        if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-            emailOptionsForHT.from = SENDER_EMAIL;
-            emailOptionsForHT.name = SENDER_NAME;
-        }
-        MailApp.sendEmail(emailOptionsForHT);
+        _sendConfiguredEmail(emailOptionsForHT);
+
         if (logIndices[HEADER_LOG_HT_NOTIFIED.toLowerCase()]) requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_HT_NOTIFIED.toLowerCase()]).setValue(new Date()).setNumberFormat(timestampFormat);
         htNotificationSent = true;
       } catch (errHt) {
@@ -1052,11 +1019,8 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: subject,
             htmlBody: htmlBody
         };
-        if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-            mailOptions.from = SENDER_EMAIL;
-            mailOptions.name = SENDER_NAME;
-        }
-        MailApp.sendEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions);
+
         Logger.log(`Row ${rowIndex}: Sent pending submission confirmation email to ${submitterEmail} for source '${options.submissionSource}'.`);
       } catch (errConfirm) {
         Logger.log(`Row ${rowIndex}: ERROR sending pending submission confirmation email: ${errConfirm.message}`);
@@ -1085,11 +1049,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: `Absence Request Submitted (Info Only): ${staffDisplayName}`,
             htmlBody: htmlBody
         };
-        if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-            mailOptions.from = SENDER_EMAIL;
-            mailOptions.name = SENDER_NAME;
-        }
-        MailApp.sendEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions);
         
         if (logIndices[HEADER_LOG_LM_NOTIFIED.toLowerCase()]) requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_LM_NOTIFIED.toLowerCase()]).setValue(new Date()).setNumberFormat(timestampFormat);
       } catch (errLm) {
@@ -1198,6 +1158,7 @@ function createCommentPromptPage(action, row, approverEmail, webAppUrl) {
 // =========================================================================
 // SHEET INTERACTION & DATA VALIDATION HELPERS
 // =========================================================================
+
 function getColumnIndices(sheet, sheetIdentifier) {
   if (!sheet || !sheetIdentifier) { Logger.log("Error: Invalid sheet or identifier for getColumnIndices."); return null; }
   const cacheKey = `columnIndices_${sheetIdentifier}_v2`;
@@ -1396,6 +1357,7 @@ function getAbsenceDetailsForDate(sheet, logIndices, targetRequestStartDate, cur
 // =========================================================================
 // STAFF DIRECTORY & USER INFORMATION HELPERS
 // =========================================================================
+
 function getStaffDirectoryInfoByEmail(staffEmail) {
   if (!staffEmail || !USE_DIRECTORY_LOOKUP || !STAFF_DIRECTORY_SHEET_ID) return null;
   staffEmail = String(staffEmail).trim().toLowerCase();
@@ -1655,6 +1617,22 @@ function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentReques
   staffEmail = String(staffEmail).trim().toLowerCase();
   let histSheet;
   try {
+    let filterList = [];
+    try {
+      // Fetch and normalize the filter list to lowercase for case-insensitive matching.
+      const rawFilterValues = _getValuesFromNamedRange("FilterList");
+      if (rawFilterValues) {
+        filterList = rawFilterValues.map(item => item.toLowerCase());
+      }
+      if (filterList.length > 0) {
+        Logger.log(`History calculation will filter out the following categories: [${filterList.join(', ')}]`);
+      }
+    } catch (e) {
+      // This error is expected if the named range doesn't exist. It's not a fatal error for this function.
+      filterList = []; // Explicitly ensure filter list is empty on error
+      Logger.log("Info: 'FilterList' named range not found or is empty. No absence types will be filtered from history summary.");
+    }
+
     histSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
     if (!histSheet || histSheet.getLastRow() < 2) return summary;
     const histIndices = getColumnIndices(histSheet, `hist_${sheetName}`);
@@ -1665,6 +1643,8 @@ function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentReques
     const periodEnd = new Date(currentRequestStartDate); periodEnd.setHours(0, 0, 0, 0);
     const periodStart = new Date(currentRequestStartDate); periodStart.setFullYear(periodStart.getFullYear() - 1); periodStart.setHours(0, 0, 0, 0);
 
+    // Logger.log(`[DEBUG] Starting history check for ${staffEmail}. Filter list is: [${filterList.join(', ')}]`);
+
     for (let i = 0; i < data.length; i++) {
       const row = data[i];
       if (!row[emailCol] || String(row[emailCol]).trim().toLowerCase() !== staffEmail) continue;
@@ -1674,8 +1654,15 @@ function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentReques
       if (recStart >= periodStart && recStart < periodEnd) {
         const dur = (typeof row[durCol] === 'number' && !isNaN(row[durCol]) && row[durCol] > 0) ? row[durCol] : 0;
         if (dur > 0) {
-          totalDays += dur;
           const type = String(row[typeCol] || 'Uncategorized').trim();
+          const isInFilterList = filterList.includes(type.toLowerCase());
+
+          // Skip if the category is in the filter list (case-insensitive)
+          if (isInFilterList) {
+            Logger.log(`[DEBUG] Row ${i+2}: Filtering out type '${type}'.`);
+            continue;
+          }
+          totalDays += dur;
           catTotals[type] = (catTotals[type] || 0) + dur;
         }
       }
@@ -1693,6 +1680,7 @@ function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentReques
 // =========================================================================
 // NOTIFICATION & EXTERNAL SERVICE HELPERS
 // =========================================================================
+
 function notifyAdmin(message, subjectPrefix = "Absence System Notification") {
   try {
     if (ADMIN_EMAIL_FOR_ERRORS && isValidEmail(ADMIN_EMAIL_FOR_ERRORS)) {
@@ -1701,11 +1689,8 @@ function notifyAdmin(message, subjectPrefix = "Absence System Notification") {
         subject: `${subjectPrefix}: ${message.substring(0, 80)}`,
         body: message
       };
-      if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-        mailOptions.from = SENDER_EMAIL;
-        mailOptions.name = SENDER_NAME;
-      }
-      MailApp.sendEmail(mailOptions);
+      _sendConfiguredEmail(mailOptions);
+      
     } else if (ADMIN_EMAIL_FOR_ERRORS) Logger.log(`Admin notify FAIL: invalid email '${ADMIN_EMAIL_FOR_ERRORS}'. Msg: ${message}`);
     else Logger.log(`Admin notify SKIP: no email configured. Msg: ${message}`);
   } catch (e) { Logger.log(`CRITICAL: Admin notify send FAIL: ${e}. Original msg: ${message}`); }
@@ -1768,6 +1753,46 @@ function extractFileIdFromDriveUrl(urlOrId) {
     if (match && match[1]) return match[1];
   }
   return null;
+}
+
+/**
+ * Sends an email using GmailApp and configured sender details if available.
+ * @param {object} mailOptions A standard options object containing to, subject, body, htmlBody, etc.
+ */
+function _sendConfiguredEmail(mailOptions) {
+  try {
+    // Prepare the options for GmailApp.sendEmail
+    const options = {};
+
+    // Add attachments if they exist in the original options
+    if (mailOptions.attachments) {
+      options.attachments = mailOptions.attachments;
+    }
+
+    // If a SENDER_EMAIL is configured and valid, add it as the 'from' and 'name'
+    if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
+      options.from = SENDER_EMAIL;
+      options.name = SENDER_NAME || SENDER_EMAIL; // Use SENDER_NAME, fallback to the email
+    }
+
+    // Add htmlBody if it exists, otherwise use plain body
+    if (mailOptions.htmlBody) {
+      options.htmlBody = mailOptions.htmlBody;
+    }
+
+    // Determine the body content for the sendEmail call. GmailApp needs a body parameter.
+    // If htmlBody exists, plain body can be a stripped version or a generic message.
+    // If htmlBody does not exist, use the plain body from mailOptions.
+    const bodyContent = mailOptions.body || 'Please view this email in an HTML-compatible client.';
+
+    // Call GmailApp.sendEmail
+    GmailApp.sendEmail(mailOptions.to, mailOptions.subject, bodyContent, options);
+
+  } catch (e) {
+    Logger.log(`Error in _sendConfiguredEmail (using GmailApp) sending to ${mailOptions.to}: ${e.message}`);
+    // Optionally, re-throw the error or notify an admin if sending fails
+    throw new Error(`Failed to send email to ${mailOptions.to}. Original error: ${e.message}`);
+  }
 }
 
 // =========================================================================
@@ -1874,6 +1899,107 @@ function _findQuestionByTitle(form, title) {
     }
   }
   return null;
+}
+
+/**
+ * Fetches and cleans values from a named range in the active spreadsheet.
+ * @param {string} rangeName The name of the named range.
+ * @returns {string[]} An array of non-empty, trimmed string values.
+ * @throws {Error} If the named range is not found.
+ * @private
+ */
+function _getValuesFromNamedRange(rangeName) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const range = ss.getRangeByName(rangeName);
+  if (!range) {
+    throw new Error(`Named range "${rangeName}" not found.`);
+  }
+  return range.getValues()
+              .flat() // Flatten the 2D array to a 1D array
+              .map(value => String(value).trim()) // Trim whitespace
+              .filter(value => value !== ''); // Filter out empty values
+}
+
+/**
+ * Updates the "Absence Type" dropdown on both the Admin and Staff forms
+ * with values from the "AbsenceTypes" named range in the spreadsheet.
+ * This should be run on a trigger (e.g., daily) or manually after updating the named range.
+ */
+function updateAbsenceTypeDropdowns() {
+  try {
+    Logger.log("Starting update of Absence Type dropdowns.");
+
+    // 1. Get the list of absence types from the named range
+    const absenceTypes = _getValuesFromNamedRange("AbsenceTypes");
+    if (!absenceTypes || absenceTypes.length === 0) {
+      Logger.log("No values found in the 'AbsenceTypes' named range. Forms will not be updated.");
+      notifyAdmin("Absence System Warning: Could not find any values in the 'AbsenceTypes' named range to update the forms.");
+      return;
+    }
+    Logger.log(`Found ${absenceTypes.length} absence types to update.`);
+
+    // 2. Define form details
+    const questionTitle = HEADER_LOG_ABSENCE_TYPE; // "Absence Type"
+    const formsToUpdate = [
+      { id: ADMIN_FORM_ID, name: "Admin Form" },
+      { id: STAFF_FORM_ID, name: "Staff Form" }
+    ];
+
+    let successCount = 0;
+    let errorMessages = [];
+
+    // 3. Iterate and update each form
+    for (const formDetail of formsToUpdate) {
+      if (!formDetail.id) {
+        Logger.log(`Skipping ${formDetail.name} because its ID is not configured.`);
+        continue;
+      }
+      try {
+        const form = FormApp.openById(formDetail.id);
+        const questionItem = _findQuestionByTitle(form, questionTitle);
+
+        if (!questionItem) {
+          throw new Error(`Could not find question "${questionTitle}" in the ${formDetail.name}.`);
+        }
+
+        const itemType = questionItem.getType();
+        if (itemType !== FormApp.ItemType.LIST && itemType !== FormApp.ItemType.MULTIPLE_CHOICE && itemType !== FormApp.ItemType.CHECKBOX) {
+          throw new Error(`Question "${questionTitle}" in ${formDetail.name} is not a compatible type (Dropdown, Multiple Choice, Checkbox). Type is ${itemType}.`);
+        }
+
+        // Use a type-safe way to set choices
+        switch (itemType) {
+          case FormApp.ItemType.LIST:
+            questionItem.asListItem().setChoiceValues(absenceTypes);
+            break;
+          case FormApp.ItemType.MULTIPLE_CHOICE:
+            questionItem.asMultipleChoiceItem().setChoiceValues(absenceTypes);
+            break;
+          case FormApp.ItemType.CHECKBOX:
+            questionItem.asCheckboxItem().setChoiceValues(absenceTypes);
+            break;
+        }
+
+        Logger.log(`Successfully updated "${questionTitle}" dropdown in ${formDetail.name}.`);
+        successCount++;
+      } catch (formError) {
+        const errorMessage = `Failed to update ${formDetail.name} (ID: ${formDetail.id}): ${formError.message}`;
+        Logger.log(errorMessage);
+        errorMessages.push(errorMessage);
+      }
+    }
+    
+    // 4. Final logging and notification
+    if (errorMessages.length > 0) {
+      notifyAdmin(`Absence Script: Errors occurred during dropdown update.\n\n${errorMessages.join('\n')}`);
+    }
+    
+    Logger.log(`Absence Type update complete. Successfully updated ${successCount} of ${formsToUpdate.length} forms.`);
+
+  } catch (error) {
+    Logger.log(`FATAL ERROR in updateAbsenceTypeDropdowns: ${error.message}\nStack: ${error.stack}`);
+    notifyAdmin(`Absence Script CRITICAL Failure: Failed to update Absence Type dropdowns. Error: ${error.message}`);
+  }
 }
 
 // =========================================================================
@@ -2176,13 +2302,216 @@ function flushColumnIndexCache() {
     Logger.log(msg);
 }
 
+/**
+ * Monitors the "Bromcom Entry" column for changes and automatically timestamps
+ * when entries are made or modified in the "Entry Timestamp" column.
+ * 
+ * This function should be set up as an onEdit trigger for the spreadsheet.
+ */
+function onBromcomEntryEdit(e) {
+  // Only process if this is the main request log sheet
+  if (!e || !e.source || !e.range) return;
+  
+  const sheet = e.range.getSheet();
+  if (sheet.getName() !== REQUEST_LOG_SHEET_NAME) return;
+  
+  try {
+    const editedRange = e.range;
+    const editedRow = editedRange.getRow();
+    
+    // Skip header row
+    if (editedRow === 1) return;
+    
+    // Get column indices for the sheet
+    const logIndices = getColumnIndices(sheet, REQUEST_LOG_SHEET_NAME);
+    if (!logIndices) {
+      Logger.log("Could not get column indices for Bromcom timestamp function");
+      return;
+    }
+    
+    // Check if required columns exist
+    const bromcomCol = logIndices[HEADER_BROMCOM_ENTRY.toLowerCase()];
+    const timestampCol = logIndices[HEADER_ENTRY_TIMESTAMP.toLowerCase()];
+    
+    if (!bromcomCol) {
+      Logger.log(`"${HEADER_BROMCOM_ENTRY}" column not found in ${REQUEST_LOG_SHEET_NAME}`);
+      return;
+    }
+    
+    if (!timestampCol) {
+      Logger.log(`"${HEADER_ENTRY_TIMESTAMP}" column not found in ${REQUEST_LOG_SHEET_NAME}`);
+      return;
+    }
+    
+    // Check if the edit was in the Bromcom Entry column
+    const editedColumn = editedRange.getColumn();
+    if (editedColumn !== bromcomCol) return;
+    
+    // Get the new value in the Bromcom Entry column
+    const newValue = editedRange.getValue();
+    
+    // Only add timestamp if there's actually content in the Bromcom Entry cell
+    if (newValue && String(newValue).trim() !== '') {
+      const now = new Date();
+      const timestampFormat = "yyyy-MM-dd HH:mm:ss";
+      
+      // Set the timestamp in the Entry Timestamp column
+      sheet.getRange(editedRow, timestampCol)
+        .setValue(now)
+        .setNumberFormat(timestampFormat);
+      
+      Logger.log(`Bromcom Entry timestamp updated for row ${editedRow}: ${Utilities.formatDate(now, Session.getScriptTimeZone(), timestampFormat)}`);
+    } else {
+      // If Bromcom Entry is cleared, also clear the timestamp
+      sheet.getRange(editedRow, timestampCol).clearContent();
+      Logger.log(`Bromcom Entry cleared for row ${editedRow}, timestamp removed`);
+    }
+    
+  } catch (error) {
+    Logger.log(`Error in onBromcomEntryEdit: ${error.message}\nStack: ${error.stack}`);
+    // Don't send admin notification for edit tracking errors to avoid spam
+  }
+}
+
+/**
+ * Manually re-runs the full processing logic for a single row in the master log.
+ * This function prompts the administrator for a row number, confirms the action,
+ * resets the row's status, and then calls the core processing handler.
+ * It's designed to fix requests that failed due to temporary data issues or errors.
+ */
+function rerunProcessingOnRow() {
+    const ui = SpreadsheetApp.getUi();
+
+    // 1. Prompt for row number
+    const promptResponse = ui.prompt(
+        'Rerun Processing',
+        'Enter the row number to reprocess:',
+        ui.ButtonSet.OK_CANCEL
+    );
+    if (promptResponse.getSelectedButton() !== ui.Button.OK || !promptResponse.getResponseText()) {
+        ui.alert('Cancelled', 'No action was taken.', ui.ButtonSet.OK);
+        return;
+    }
+    const rowIndex = parseInt(promptResponse.getResponseText().trim(), 10);
+    if (isNaN(rowIndex) || rowIndex < 2) {
+        ui.alert('Invalid Row', 'Please enter a valid row number (2 or greater).', ui.ButtonSet.OK);
+        return;
+    }
+
+    // 2. Get sheet and validate row existence
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const requestSheet = ss.getSheetByName(REQUEST_LOG_SHEET_NAME);
+    if (!requestSheet) {
+        ui.alert('Error', `Sheet "${REQUEST_LOG_SHEET_NAME}" not found.`, ui.ButtonSet.OK);
+        return;
+    }
+    if (rowIndex > requestSheet.getLastRow()) {
+        ui.alert('Error', `Row ${rowIndex} does not exist. The last row is ${requestSheet.getLastRow()}.`, ui.ButtonSet.OK);
+        return;
+    }
+
+    // 3. Confirm the destructive action
+    const confirmResponse = ui.alert(
+        'Confirm Action',
+        `This will ERASE the current status and re-run all validation and notification logic for row ${rowIndex}.\n\nThis is useful for fixing errored requests. Are you sure you want to proceed?`,
+        ui.ButtonSet.YES_NO
+    );
+    if (confirmResponse !== ui.Button.YES) {
+        ui.alert('Cancelled', 'No action was taken.', ui.ButtonSet.OK);
+        return;
+    }
+    
+    // 4. Lock and process
+    const lock = LockService.getScriptLock();
+    if (!lock.tryLock(20000)) { // Increased timeout for interactive use
+        ui.alert('Server Busy', 'Another process is running. Please try again in a moment.', ui.ButtonSet.OK);
+        return;
+    }
+    
+    try {
+        const logIndices = getColumnIndices(requestSheet, REQUEST_LOG_SHEET_NAME);
+        if (!logIndices) throw new Error("Could not get column indices. Try flushing the cache first.");
+
+        // 5. Get row data and determine original source and approval path
+        const rowData = requestSheet.getRange(rowIndex, 1, 1, requestSheet.getLastColumn()).getValues()[0];
+        const submissionSource = rowData[logIndices[HEADER_LOG_SUBMISSION_SOURCE.toLowerCase()] - 1] || 'Staff Form'; // Default to Staff Form if blank
+
+        let requiresApproval = true; // Default behavior
+        if (submissionSource === 'Admin Form') {
+            const approvalPrompt = ui.alert(
+                'Approval Required?',
+                'Should this admin-submitted request be sent to the Headteacher for approval?\n\n- Choose YES to trigger the approval workflow.\n- Choose NO to log it directly as "Approved - Admin Logged".',
+                ui.ButtonSet.YES_NO
+            );
+            requiresApproval = (approvalPrompt === ui.Button.YES);
+        }
+        
+        // 6. Reset status, timestamp, and calculated fields to simulate a fresh submission
+        const columnsToClear = [
+            HEADER_LOG_APPROVAL_STATUS, HEADER_LOG_LM_NOTIFIED, HEADER_LOG_HT_NOTIFIED,
+            HEADER_LOG_APPROVAL_DATE, HEADER_LOG_APPROVER_EMAIL, HEADER_LOG_DURATION_HOURS,
+            HEADER_LOG_DURATION_DAYS, HEADER_LOG_APPROVER_COMMENT
+        ];
+
+        columnsToClear.forEach(header => {
+            const colIndex = logIndices[header.toLowerCase()];
+            if (colIndex) {
+                requestSheet.getRange(rowIndex, colIndex).clearContent();
+            }
+        });
+        SpreadsheetApp.flush(); // Ensure cleared values are saved before proceeding
+
+        // 7. Reconstruct processing options and call the core handler
+        const webAppUrl = WEB_APP_URL;
+        if (requiresApproval && !webAppUrl) {
+            throw new Error("Script must be deployed as a Web App for approval links to work. The rerun cannot proceed.");
+        }
+
+        const startDateRaw = rowData[logIndices[HEADER_LOG_ABSENCE_START_DATE.toLowerCase()] - 1];
+        const startTimeRaw = rowData[logIndices[HEADER_LOG_ABSENCE_START_TIME.toLowerCase()] - 1];
+        const formStartDateTime = combineDateAndTime(startDateRaw, startTimeRaw);
+
+        const absenceDetailsOnDate = getAbsenceDetailsForDate(requestSheet, logIndices, formStartDateTime, rowIndex);
+
+        const processingOptions = {
+            notifyLM: true,
+            notifyHT: requiresApproval,
+            submissionSource: submissionSource,
+            webAppUrl: webAppUrl,
+            absenceDetailsOnDate: absenceDetailsOnDate,
+            adminSubmitterEmail: null // This info is not available on rerun, but not critical
+        };
+
+        // Call the core handler with the reconstructed data and options
+        _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, processingOptions);
+
+        ui.alert('Reprocessing Initiated', `Processing for row ${rowIndex} has been re-run. Please check the sheet for the updated status.`, ui.ButtonSet.OK);
+
+    } catch (e) {
+        Logger.log(`ERROR during manual rerun for row ${rowIndex}: ${e.message}\n${e.stack}`);
+        ui.alert('Error During Rerun', `An error occurred: ${e.message}. See script logs for details.`, ui.ButtonSet.OK);
+    } finally {
+        lock.releaseLock();
+    }
+}
+
 function onOpen() {
-  SpreadsheetApp.getUi().createMenu('Admin Absence Tools')
-    .addItem('Update Admin Form Staff List', 'updateAdminFormStaffList')
-    .addItem('Flush Column Indices Cache', 'flushColumnIndexCache')
-    .addSeparator()
+  const ui = SpreadsheetApp.getUi();
+  const mainMenu = ui.createMenu('Admin Absence Tools');
+  
+  // Create the "Archiving" submenu
+  const archiveSubMenu = ui.createMenu('Archiving')
     .addItem('Archive Old Requests (Manual)', 'archiveOldRequests')
     .addItem('Setup Automatic Archiving', 'setupAutomaticArchivingTrigger')
-    .addItem('Remove Automatic Archiving', 'removeAutomaticArchivingTrigger')
+    .addItem('Remove Automatic Archiving', 'removeAutomaticArchivingTrigger');
+
+  // Build the main menu
+  mainMenu.addItem('Update Admin Form Staff List', 'updateAdminFormStaffList')
+    .addItem('Update Absence Type Dropdowns', 'updateAbsenceTypeDropdowns')
+    .addItem('Flush Column Indices Cache', 'flushColumnIndexCache')
+    .addSeparator()
+    .addItem('Rerun Processing on Row', 'rerunProcessingOnRow')
+    .addSeparator()
+    .addSubMenu(archiveSubMenu) // Add the submenu here
     .addToUi();
 }
