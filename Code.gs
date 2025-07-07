@@ -19,7 +19,7 @@ const TARGET_CALENDAR_ID       = "c_860cc463977d96c5225672c0d56a6f7585aaa64ddd3c
 const ADMIN_FORM_ID            = "1XRwmIU4n4muXoq10-GLAb8M4RZLa8pKD2V0em96-sLM"; // For use in populating email dropdown
 const STAFF_FORM_ID            = "1D2CQuaqKizLMHotOn73SjHF9eg1w-1AfS3ea0ZvlEsc"; // Staff-facing absence request form.
 const HEADER_ADMIN_NOTIFY_HT   = "Notify Headteacher?";        // The exact question text for the HT notification option on the admin form.
-const WEB_APP_URL              = "https://script.google.com/a/macros/sidneystringeracademy.org.uk/s/AKfycbz9PhI-2hp7_msExyJ-uIljjbIT_G---k4Z8j2A8sgYdUuuSzPaR9UDbSFI-XD7UbTs/exec";
+const WEB_APP_URL              = "https://script.google.com/a/macros/sidneystringeracademy.org.uk/s/AKfycbwE4vpFOQwl4soCQ7OvuOiGyZ7Ys-WX_sB7gSXUrvM5RFu0rhQ61pszwO7iR_wg2pAO/exec";
 
 // --- Sheet Configuration ---
 const REQUEST_LOG_SHEET_NAME   = "Staff Absence Requests Log"; // Name of the master response sheet.
@@ -82,6 +82,7 @@ const HEADER_LOG_START_DATETIME         = "Start Date/Time";      // Programmati
 const HEADER_LOG_END_DATETIME           = "End Date/Time";        // Programmatically combined end date/time.
 const HEADER_BROMCOM_ENTRY              = "Bromcom Entry";        // Populated when staff enter onto Bromcom
 const HEADER_ENTRY_TIMESTAMP            = "Entry Timestamp";      // Programmatically updated onEdit of Bromcom Entry
+const HEADER_LOG_APPROVAL_EMAIL_ID      = "Approval Email ID";    // Stores the Message-ID of the approval email sent to headteacher
 
 // --- Header Names in "Absence History" Sheet (Used for READING historical data) ---
 const HEADER_HIST_STAFF_EMAIL           = "EmailAddress";     // Email of the staff member in the history record.
@@ -103,7 +104,7 @@ const ARCHIVE_OLDER_THAN_DAYS  = 6; // Archive requests older than this many day
 // ---
 
 // --- GLOBAL VARIABLES ---
-const SPREADSHEET_ID = SpreadsheetApp.getActiveSpreadsheet().getId();
+const SPREADSHEET_ID = "1pbs1aHoiAEBbkVnHDHjXUbd7JuBmJa5KNFW-DhE5Vp8"; // REPLACE: Your actual spreadsheet ID from the URL
 const SCRIPT_CACHE = CacheService.getScriptCache(); // Cache for column indices to improve performance.
 
 // =========================================================================
@@ -126,7 +127,7 @@ function _routeFormResponseToMasterLog(e, sourceOptions) {
 
   try {
     const sourceSheet = e.range.getSheet();
-    const masterLogSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(REQUEST_LOG_SHEET_NAME);
+    const masterLogSheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(REQUEST_LOG_SHEET_NAME);
     if (!masterLogSheet) throw new Error(`Master log sheet "${REQUEST_LOG_SHEET_NAME}" not found.`);
 
     // Get the column header-to-index mapping for both the source and master sheets.
@@ -305,7 +306,8 @@ function _onFormSubmitHandler(rowData, rowIndex, requestSheet, sourceOptions) {
       submissionSource: sourceOptions.submissionSource,
       webAppUrl: webAppUrl,
       absenceDetailsOnDate: absenceDetailsOnDate,
-      adminSubmitterEmail: sourceOptions.adminSubmitterEmail // Pass email through
+      adminSubmitterEmail: sourceOptions.adminSubmitterEmail, // Pass email through
+      siteId: sourceOptions.siteId || 'default' // Pass site ID for cancellation URL
     };
 
     _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, processingOptions);
@@ -345,43 +347,63 @@ function doGet(e) {
   try {
     // --- Parameter and Security Validation ---
     const params = e.parameter;
-    const { action, row: rowParam, approver: approverParam, comment } = params;
+    const { action, row: rowParam, approver: approverParam, comment, site, user } = params;
     const isCommentProvided = typeof comment !== 'undefined';
     const commentParam = isCommentProvided ? (comment || "").trim() : "";
 
-    Logger.log(`doGet received: action=${action}, row=${rowParam}, approver=${approverParam}, comment_provided=${isCommentProvided}, comment='${commentParam}'`);
+    Logger.log(`doGet received: action=${action}, row=${rowParam}, approver=${approverParam}, comment_provided=${isCommentProvided}, comment='${commentParam}', site=${site}, user=${user}`);
 
-    if (!action || !rowParam || isNaN(parseInt(rowParam, 10)) || parseInt(rowParam, 10) < 2 || !approverParam) {
-      throw new Error("Invalid or missing parameters in the request link. Please ensure the link was copied correctly.");
+    // Different validation for cancellation requests
+    if (action === 'cancel') {
+      if (!rowParam || isNaN(parseInt(rowParam, 10)) || parseInt(rowParam, 10) < 2 || !user) {
+        throw new Error("Invalid or missing parameters in the cancellation link. Please ensure the link was copied correctly.");
+      }
+    } else {
+      if (!action || !rowParam || isNaN(parseInt(rowParam, 10)) || parseInt(rowParam, 10) < 2 || !approverParam) {
+        throw new Error("Invalid or missing parameters in the request link. Please ensure the link was copied correctly.");
+      }
     }
+    
     const rowIndex = parseInt(rowParam, 10);
-    const decodedApprover = decodeURIComponent(approverParam);
+    const decodedApprover = approverParam ? decodeURIComponent(approverParam) : null;
 
     const activeUser = Session.getActiveUser()?.getEmail();
     const effectiveUser = Session.getEffectiveUser()?.getEmail();
 
-    if (!effectiveUser || effectiveUser.toLowerCase() !== HEADTEACHER_EMAIL.toLowerCase()) {
-      Logger.log(`SECURITY ALERT: doGet executed by effective user ${effectiveUser}, but script is configured for HEADTEACHER_EMAIL ${HEADTEACHER_EMAIL}. Check deployment settings (must be 'Execute as: Me' by the configured Headteacher).`);
-      throw new Error(`Configuration Error: The script is not running as the designated Headteacher (${HEADTEACHER_EMAIL}). Please contact the administrator to correct the script deployment settings.`);
-    }
-    if (!activeUser || activeUser.toLowerCase() !== decodedApprover.toLowerCase()) {
-      Logger.log(`Access Denied: Active user (${activeUser}) does not match the approver in the link (${decodedApprover}). Effective user: ${effectiveUser}.`);
-      throw new Error(`Access Denied. This link was intended for ${decodedApprover}. Please ensure you are logged into Google as ${decodedApprover}.`);
+    // Different authentication for cancellation requests
+    if (action === 'cancel') {
+      if (!effectiveUser || effectiveUser.toLowerCase() !== HEADTEACHER_EMAIL.toLowerCase()) {
+        Logger.log(`SECURITY ALERT: doGet executed by effective user ${effectiveUser}, but script is configured for HEADTEACHER_EMAIL ${HEADTEACHER_EMAIL}. Check deployment settings (must be 'Execute as: Me' by the configured Headteacher).`);
+        throw new Error(`Configuration Error: The script is not running as the designated Headteacher (${HEADTEACHER_EMAIL}). Please contact the administrator to correct the script deployment settings.`);
+      }
+      // For cancellation, we don't need to check activeUser vs approver, we'll validate against the original requester
+    } else {
+      if (!effectiveUser || effectiveUser.toLowerCase() !== HEADTEACHER_EMAIL.toLowerCase()) {
+        Logger.log(`SECURITY ALERT: doGet executed by effective user ${effectiveUser}, but script is configured for HEADTEACHER_EMAIL ${HEADTEACHER_EMAIL}. Check deployment settings (must be 'Execute as: Me' by the configured Headteacher).`);
+        throw new Error(`Configuration Error: The script is not running as the designated Headteacher (${HEADTEACHER_EMAIL}). Please contact the administrator to correct the script deployment settings.`);
+      }
+      if (!activeUser || activeUser.toLowerCase() !== decodedApprover.toLowerCase()) {
+        Logger.log(`Access Denied: Active user (${activeUser}) does not match the approver in the link (${decodedApprover}). Effective user: ${effectiveUser}.`);
+        throw new Error(`Access Denied. This link was intended for ${decodedApprover}. Please ensure you are logged into Google as ${decodedApprover}.`);
+      }
     }
 
-    // If the comment form hasn't been submitted yet, show it.
+    // If the comment form hasn't been submitted yet, show it (except for cancellation requests).
     const webAppUrl = WEB_APP_URL
-    if (!isCommentProvided) {
+    if (!isCommentProvided && action !== 'cancel') {
       Logger.log(`Comment not provided for action ${action}, row ${rowIndex}. Displaying comment prompt page.`);
       return createCommentPromptPage(action, rowIndex, decodedApprover, webAppUrl);
     }
 
     // --- Sheet and Data Validation ---
-    requestSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(REQUEST_LOG_SHEET_NAME);
+    requestSheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(REQUEST_LOG_SHEET_NAME);
     if (!requestSheet) throw new Error(`Sheet "${REQUEST_LOG_SHEET_NAME}" not found.`);
 
     const logIndices = getColumnIndices(requestSheet, REQUEST_LOG_SHEET_NAME);
     const requiredDoGetHeaders = [HEADER_LOG_APPROVAL_STATUS, HEADER_LOG_PAY_STATUS, HEADER_LOG_APPROVAL_DATE, HEADER_LOG_APPROVER_EMAIL, HEADER_MASTER_LOG_EMAIL, HEADER_LOG_ABSENCE_TYPE, HEADER_LOG_ABSENCE_START_DATE, HEADER_LOG_ABSENCE_START_TIME, HEADER_LOG_ABSENCE_END_DATE, HEADER_LOG_ABSENCE_END_TIME, HEADER_LOG_APPROVER_COMMENT, HEADER_LOG_STAFF_NAME, HEADER_LOG_DURATION_DAYS, HEADER_LOG_DURATION_HOURS];
+    if (action === 'cancel' && logIndices[HEADER_LOG_APPROVAL_EMAIL_ID.toLowerCase()]) {
+      requiredDoGetHeaders.push(HEADER_LOG_APPROVAL_EMAIL_ID);
+    }
     if (!validateRequiredHeaders(logIndices, requiredDoGetHeaders, REQUEST_LOG_SHEET_NAME)) {
       throw new Error(`Missing required headers in "${REQUEST_LOG_SHEET_NAME}" for doGet processing. Cannot proceed.`);
     }
@@ -390,15 +412,96 @@ function doGet(e) {
       throw new Error(`Invalid row number (${rowIndex}). Row does not exist in the sheet "${REQUEST_LOG_SHEET_NAME}". Max rows: ${requestSheet.getMaxRows()}`);
     }
 
+    // --- Handle Cancellation Request ---
+    if (action === 'cancel') {
+      const decodedUser = decodeURIComponent(user);
+      const originalRequesterEmail = requestSheet.getRange(rowIndex, logIndices[HEADER_MASTER_LOG_EMAIL.toLowerCase()]).getValue();
+      
+      // Security validation: ensure the user parameter matches the original requester
+      if (!originalRequesterEmail || originalRequesterEmail.toString().toLowerCase() !== decodedUser.toLowerCase()) {
+        Logger.log(`SECURITY ALERT: Cancellation attempt by ${decodedUser} for row ${rowIndex}, but original requester is ${originalRequesterEmail}`);
+        throw new Error(`Access Denied. You are not authorized to cancel this request.`);
+      }
+      
+      // Read current status with atomic Read-Modify-Write pattern
+      const currentStatus = requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()]).getValue();
+      
+      // Validate that the request can be cancelled
+      if (currentStatus !== 'Pending Approval') {
+        Logger.log(`Cancellation attempted for row ${rowIndex} with status '${currentStatus}' by ${decodedUser}`);
+        title = "Request Cannot Be Cancelled";
+        message = `This request cannot be cancelled because its current status is "${currentStatus}". Only requests with status "Pending Approval" can be cancelled.`;
+        bgColor = "#ff9800"; // Orange for warning
+        return createHtmlResponse(title, message, bgColor);
+      }
+      
+      // Immediately update the status to prevent race conditions
+      requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()]).setValue('Cancelled by User');
+      requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVAL_DATE.toLowerCase()]).setValue(new Date()).setNumberFormat("yyyy-MM-dd HH:mm:ss");
+      requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVER_EMAIL.toLowerCase()]).setValue(decodedUser);
+      requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVER_COMMENT.toLowerCase()]).setValue('Request cancelled by the staff member');
+      SpreadsheetApp.flush(); // Ensure the write is committed immediately
+      
+      // Send cancellation reply to the original approval email thread
+      const approvalEmailId = logIndices[HEADER_LOG_APPROVAL_EMAIL_ID.toLowerCase()] ? 
+        requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVAL_EMAIL_ID.toLowerCase()]).getValue() : null;
+      
+      if (approvalEmailId) {
+        try {
+          const staffName = requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_STAFF_NAME.toLowerCase()]).getValue();
+          const startDateRaw = requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_ABSENCE_START_DATE.toLowerCase()]).getValue();
+          const startTimeRaw = requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_ABSENCE_START_TIME.toLowerCase()]).getValue();
+          const absenceType = requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_ABSENCE_TYPE.toLowerCase()]).getValue();
+          
+          // Use the same date handling as the rest of the code
+          const startDateTime = combineDateAndTime(startDateRaw, startTimeRaw);
+          const tz = Session.getScriptTimeZone();
+          const formattedStartDate = (startDateTime instanceof Date && !isNaN(startDateTime)) ? 
+            Utilities.formatDate(startDateTime, tz, "dd/MM/yyyy") : "Unknown Date";
+          
+          const replySubject = `RE: Absence Request ACTION REQUIRED: ${staffName}`;
+          const replyBody = `
+            <div style="font-family: Arial, sans-serif; padding: 20px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9;">
+              <h3 style="color: #d9534f; margin-top: 0;">Request Cancelled by Staff Member</h3>
+              <p><strong>Staff Member:</strong> ${staffName} (${decodedUser})</p>
+              <p><strong>Absence Type:</strong> ${absenceType}</p>
+              <p><strong>Start Date:</strong> ${formattedStartDate}</p>
+              <p><strong>Status:</strong> Cancelled by User</p>
+              <p style="margin-bottom: 0;"><strong>No action is required.</strong> The staff member has cancelled their absence request.</p>
+            </div>
+          `;
+          
+          // Get the thread by message ID and reply to it
+          const thread = GmailApp.getMessageById(approvalEmailId).getThread();
+          thread.reply(replyBody, {
+            htmlBody: replyBody,
+            from: SENDER_EMAIL && isValidEmail(SENDER_EMAIL) ? SENDER_EMAIL : undefined,
+            name: SENDER_NAME || 'Absence Request System'
+          });
+          
+          Logger.log(`Sent cancellation reply to approval email thread for row ${rowIndex}`);
+        } catch (replyError) {
+          Logger.log(`Error sending cancellation reply for row ${rowIndex}: ${replyError.message}`);
+          notifyAdmin(`Absence Script Warning: Failed to send cancellation reply for row ${rowIndex}. Error: ${replyError.message}`);
+        }
+      }
+      
+      title = "Request Successfully Cancelled";
+      message = `Your absence request has been successfully cancelled. The approver has been notified, and no further action is required.`;
+      bgColor = "#4CAF50"; // Green for success
+      return createHtmlResponse(title, message, bgColor);
+    }
+
+    // --- Continue with existing approval/rejection logic ---
     const statusCol = logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()];
     const statusRange = requestSheet.getRange(rowIndex, statusCol);
     const currentStatus = statusRange.getValue();
 
-    if (currentStatus === 'Approved' || currentStatus === 'Rejected') {
+    if (currentStatus === 'Approved' || currentStatus === 'Rejected' || currentStatus === 'Cancelled by User') {
       Logger.log(`Action '${action}' on row ${rowIndex} ignored. Status already '${currentStatus}'.`);
       title = "Absence Request Already Processed";
       message = `Request for row ${rowIndex} has already been processed with status: ${currentStatus}.\nNo further action has been taken.`;
-      bgColor = (currentStatus === 'Approved') ? '#4CAF50' : '#ff9800'; // Orange for already rejected
+      bgColor = (currentStatus === 'Approved') ? '#4CAF50' : '#ff9800'; // Orange for already rejected/cancelled
       return createHtmlResponse(title, message, bgColor);
     }
 
@@ -535,7 +638,7 @@ function doGet(e) {
 function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, options) {
   try {
     // --- Header Validation ---
-    const requiredCoreHeaders = [HEADER_LOG_TIMESTAMP, HEADER_MASTER_LOG_EMAIL, HEADER_LOG_STAFF_NAME, HEADER_LOG_ABSENCE_START_DATE, HEADER_LOG_ABSENCE_START_TIME, HEADER_LOG_ABSENCE_END_DATE, HEADER_LOG_ABSENCE_END_TIME, HEADER_LOG_ABSENCE_TYPE, HEADER_LOG_REASON, HEADER_LOG_APPROVAL_STATUS, HEADER_LOG_PAY_STATUS, HEADER_LOG_LM_NOTIFIED, HEADER_LOG_HT_NOTIFIED, HEADER_LOG_APPROVAL_DATE, HEADER_LOG_APPROVER_EMAIL, HEADER_LOG_DURATION_HOURS, HEADER_LOG_APPROVER_COMMENT, HEADER_LOG_EVIDENCE_FILE, HEADER_LOG_SUBMISSION_SOURCE];
+    const requiredCoreHeaders = [HEADER_LOG_TIMESTAMP, HEADER_MASTER_LOG_EMAIL, HEADER_LOG_STAFF_NAME, HEADER_LOG_ABSENCE_START_DATE, HEADER_LOG_ABSENCE_START_TIME, HEADER_LOG_ABSENCE_END_DATE, HEADER_LOG_ABSENCE_END_TIME, HEADER_LOG_ABSENCE_TYPE, HEADER_LOG_REASON, HEADER_LOG_APPROVAL_STATUS, HEADER_LOG_PAY_STATUS, HEADER_LOG_LM_NOTIFIED, HEADER_LOG_HT_NOTIFIED, HEADER_LOG_APPROVAL_DATE, HEADER_LOG_APPROVER_EMAIL, HEADER_LOG_DURATION_HOURS, HEADER_LOG_APPROVER_COMMENT, HEADER_LOG_EVIDENCE_FILE, HEADER_LOG_SUBMISSION_SOURCE, HEADER_LOG_APPROVAL_EMAIL_ID];
     if (!USE_DIRECTORY_LOOKUP && !logIndices[HEADER_LOG_LM_EMAIL_FORM.toLowerCase()]) {
       requiredCoreHeaders.push(HEADER_LOG_LM_EMAIL_FORM);
     }
@@ -929,6 +1032,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
 
     // Standard request notification process
     let htNotificationSent = false;
+    let approvalEmailId = null;
     if (options.notifyHT && isValidEmail(HEADTEACHER_EMAIL) && options.webAppUrl) {
       const emailOptionsForHT = { to: HEADTEACHER_EMAIL, subject: `Absence Request ACTION REQUIRED: ${staffDisplayName}`, attachments: [] };
       
@@ -979,9 +1083,15 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
       emailOptionsForHT.htmlBody = template.evaluate().getContent();
 
       try {
-        _sendConfiguredEmail(emailOptionsForHT);
+        approvalEmailId = _sendConfiguredEmail(emailOptionsForHT, true);
 
         if (logIndices[HEADER_LOG_HT_NOTIFIED.toLowerCase()]) requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_HT_NOTIFIED.toLowerCase()]).setValue(new Date()).setNumberFormat(timestampFormat);
+        
+        // Store the approval email ID for potential cancellation replies
+        if (approvalEmailId && logIndices[HEADER_LOG_APPROVAL_EMAIL_ID.toLowerCase()]) {
+          requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVAL_EMAIL_ID.toLowerCase()]).setValue(approvalEmailId);
+        }
+        
         htNotificationSent = true;
       } catch (errHt) {
         notifyAdmin(`Absence Script ERROR: Failed to send approval email to HT for row ${rowIndex}. Error: ${errHt.message}`);
@@ -1012,6 +1122,12 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
         template.formattedEnd = `${formattedEndDate} at ${formattedEndTime}`;
         template.reason = reason || '(None provided)';
         template.durationForEmail = durationForEmail;
+        
+        // Generate the cancellation URL for staff-initiated requests
+        if (options.submissionSource === 'Staff Form' && options.webAppUrl) {
+          template.cancelUrl = `${options.webAppUrl}?action=cancel&row=${rowIndex}&site=${encodeURIComponent(options.siteId || 'default')}&user=${encodeURIComponent(submitterEmail)}`;
+        }
+        
         const htmlBody = template.evaluate().getContent();
 
         const mailOptions = {
@@ -1633,7 +1749,7 @@ function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentReques
       Logger.log("Info: 'FilterList' named range not found or is empty. No absence types will be filtered from history summary.");
     }
 
-    histSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    histSheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(sheetName);
     if (!histSheet || histSheet.getLastRow() < 2) return summary;
     const histIndices = getColumnIndices(histSheet, `hist_${sheetName}`);
     const reqHistHeaders = [HEADER_HIST_STAFF_EMAIL, HEADER_HIST_START_DATE, HEADER_HIST_DURATION_DAYS, HEADER_HIST_ABSENCE_TYPE];
@@ -1643,7 +1759,7 @@ function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentReques
     const periodEnd = new Date(currentRequestStartDate); periodEnd.setHours(0, 0, 0, 0);
     const periodStart = new Date(currentRequestStartDate); periodStart.setFullYear(periodStart.getFullYear() - 1); periodStart.setHours(0, 0, 0, 0);
 
-    // Logger.log(`[DEBUG] Starting history check for ${staffEmail}. Filter list is: [${filterList.join(', ')}]`);
+    Logger.log(`[DEBUG] Starting history check for ${staffEmail}. Filter list is: [${filterList.join(', ')}]`);
 
     for (let i = 0; i < data.length; i++) {
       const row = data[i];
@@ -1759,7 +1875,7 @@ function extractFileIdFromDriveUrl(urlOrId) {
  * Sends an email using GmailApp and configured sender details if available.
  * @param {object} mailOptions A standard options object containing to, subject, body, htmlBody, etc.
  */
-function _sendConfiguredEmail(mailOptions) {
+function _sendConfiguredEmail(mailOptions, returnMessageId = false) {
   try {
     // Prepare the options for GmailApp.sendEmail
     const options = {};
@@ -1772,24 +1888,53 @@ function _sendConfiguredEmail(mailOptions) {
     // If a SENDER_EMAIL is configured and valid, add it as the 'from' and 'name'
     if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
       options.from = SENDER_EMAIL;
-      options.name = SENDER_NAME || SENDER_EMAIL; // Use SENDER_NAME, fallback to the email
+      options.name = SENDER_NAME || SENDER_EMAIL;
     }
 
-    // Add htmlBody if it exists, otherwise use plain body
+    // Add htmlBody if it exists
     if (mailOptions.htmlBody) {
       options.htmlBody = mailOptions.htmlBody;
     }
 
-    // Determine the body content for the sendEmail call. GmailApp needs a body parameter.
-    // If htmlBody exists, plain body can be a stripped version or a generic message.
-    // If htmlBody does not exist, use the plain body from mailOptions.
+    // Determine the body content for the sendEmail call
     const bodyContent = mailOptions.body || 'Please view this email in an HTML-compatible client.';
 
-    // Call GmailApp.sendEmail
+    // Always use GmailApp.sendEmail to preserve group email functionality
     GmailApp.sendEmail(mailOptions.to, mailOptions.subject, bodyContent, options);
 
+    // If we need the message ID, search for the message we just sent
+    if (returnMessageId) {
+      try {
+        // Wait a moment for the email to be indexed by Gmail
+        Utilities.sleep(2000);
+
+        // Create a unique search query to find the message we just sent
+        const searchQuery = `to:${mailOptions.to} subject:"${mailOptions.subject}" from:me`;
+        
+        // Search for messages matching our criteria
+        const threads = GmailApp.search(searchQuery, 0, 1);
+        
+        if (threads.length > 0) {
+          // Get the most recent message from the first thread
+          const messages = threads[0].getMessages();
+          if (messages.length > 0) {
+            const latestMessage = messages[messages.length - 1];
+            const messageId = latestMessage.getId();
+            Logger.log(`Successfully captured message ID: ${messageId} for email to ${mailOptions.to}`);
+            return messageId;
+          }
+        }
+        
+        Logger.log(`Warning: Could not find message ID for email sent to ${mailOptions.to}`);
+        return null;
+      } catch (searchError) {
+        Logger.log(`Error searching for sent message ID: ${searchError.message}`);
+        return null;
+      }
+    }
+
   } catch (e) {
-    Logger.log(`Error in _sendConfiguredEmail (using GmailApp) sending to ${mailOptions.to}: ${e.message}`);
+    Logger.log(`Error in _sendConfiguredEmail sending to ${mailOptions.to}: ${e.message}`);
     // Optionally, re-throw the error or notify an admin if sending fails
     throw new Error(`Failed to send email to ${mailOptions.to}. Original error: ${e.message}`);
   }
@@ -1909,7 +2054,7 @@ function _findQuestionByTitle(form, title) {
  * @private
  */
 function _getValuesFromNamedRange(rangeName) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   const range = ss.getRangeByName(rangeName);
   if (!range) {
     throw new Error(`Named range "${rangeName}" not found.`);
@@ -2066,7 +2211,7 @@ function archiveOldRequestsAutomatically() {
  * @private
  */
 function _performArchiving() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   const logSheet = ss.getSheetByName(REQUEST_LOG_SHEET_NAME);
   if (!logSheet) {
     throw new Error(`Log sheet "${REQUEST_LOG_SHEET_NAME}" not found.`);
@@ -2183,53 +2328,93 @@ function _performArchiving() {
   }
 }
 
-/**
- * Sets up a time-driven trigger to run automatic archiving daily.
- * Run this function once to install the trigger.
- */
-function setupAutomaticArchivingTrigger() {
-  // Delete any existing archiving triggers first
-  const triggers = ScriptApp.getProjectTriggers();
-  triggers.forEach(trigger => {
-    if (trigger.getHandlerFunction() === 'archiveOldRequestsAutomatically') {
-      ScriptApp.deleteTrigger(trigger);
-      Logger.log('Deleted existing automatic archiving trigger');
-    }
-  });
 
-  // Create new daily trigger at 2 AM
+
+// =========================================================================
+// TRIGGER MANAGEMENT
+// =========================================================================
+
+/**
+ * Sets up all required triggers for the absence management system.
+ * This includes form submission, edit triggers, and time-driven triggers.
+ * Run this once after deploying the standalone script.
+ */
+function setupAllTriggers() {
+  deleteAllTriggers(); // Start with a clean slate
+  
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  
+  // Form Submission Trigger
+  ScriptApp.newTrigger('handleFormSubmissions')
+    .forSpreadsheet(ss)
+    .onFormSubmit()
+    .create();
+    
+  // Edit Trigger for Bromcom column
+  ScriptApp.newTrigger('onBromcomEntryEdit')
+    .forSpreadsheet(ss)
+    .onEdit()
+    .create();
+    
+  // Time-driven trigger for updating Admin Form staff list (daily at 1 AM)
+  ScriptApp.newTrigger('updateAdminFormStaffList')
+    .timeBased()
+    .everyDays(1)
+    .atHour(1)
+    .create();
+
+  // Time-driven trigger for updating Absence Type dropdowns (daily at 1 AM)
+  ScriptApp.newTrigger('updateAbsenceTypeDropdowns')
+    .timeBased()
+    .everyDays(1)
+    .atHour(1)
+    .create();
+
+  // Time-driven trigger for automatic archiving (daily at 2 AM)
   ScriptApp.newTrigger('archiveOldRequestsAutomatically')
     .timeBased()
     .everyDays(1)
-    .atHour(2) // 2 AM
+    .atHour(2)
     .create();
     
-  Logger.log('Created automatic archiving trigger to run daily at 2 AM');
+  Logger.log('All triggers have been created successfully.');
   
-  // Optionally notify admin
-  notifyAdmin('Automatic archiving trigger has been set up to run daily at 2 AM', 'Absence System - Trigger Setup');
+  // If called from bound script context, show UI alert
+  try {
+    const ui = SpreadsheetApp.getUi();
+    ui.alert('Trigger Setup Complete', 'All triggers have been created successfully.', ui.ButtonSet.OK);
+  } catch (e) {
+    // If no UI context, just log
+    Logger.log('Triggers created - no UI context available for alert');
+  }
 }
 
 /**
- * Removes the automatic archiving trigger.
- * Run this function if you want to disable automatic archiving.
+ * Deletes all project triggers.
+ * Useful for cleanup or before setting up triggers again.
  */
-function removeAutomaticArchivingTrigger() {
+function deleteAllTriggers() {
   const triggers = ScriptApp.getProjectTriggers();
-  let removed = 0;
+  let deleted = 0;
   
-  triggers.forEach(trigger => {
-    if (trigger.getHandlerFunction() === 'archiveOldRequestsAutomatically') {
-      ScriptApp.deleteTrigger(trigger);
-      removed++;
+  for (const trigger of triggers) {
+    ScriptApp.deleteTrigger(trigger);
+    deleted++;
+  }
+  
+  Logger.log(`Deleted ${deleted} trigger(s).`);
+  
+  // If called from bound script context, show UI alert
+  try {
+    const ui = SpreadsheetApp.getUi();
+    if (deleted > 0) {
+      ui.alert('Triggers Deleted', `Deleted ${deleted} trigger(s).`, ui.ButtonSet.OK);
+    } else {
+      ui.alert('No Triggers Found', 'No triggers were found to delete.', ui.ButtonSet.OK);
     }
-  });
-  
-  if (removed > 0) {
-    Logger.log(`Removed ${removed} automatic archiving trigger(s)`);
-    notifyAdmin(`Removed ${removed} automatic archiving trigger(s)`, 'Absence System - Trigger Removed');
-  } else {
-    Logger.log('No automatic archiving triggers found to remove');
+  } catch (e) {
+    // If no UI context, just log
+    Logger.log('Triggers deleted - no UI context available for alert');
   }
 }
 
@@ -2399,7 +2584,7 @@ function rerunProcessingOnRow() {
     }
 
     // 2. Get sheet and validate row existence
-    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
     const requestSheet = ss.getSheetByName(REQUEST_LOG_SHEET_NAME);
     if (!requestSheet) {
         ui.alert('Error', `Sheet "${REQUEST_LOG_SHEET_NAME}" not found.`, ui.ButtonSet.OK);
@@ -2501,9 +2686,12 @@ function onOpen() {
   
   // Create the "Archiving" submenu
   const archiveSubMenu = ui.createMenu('Archiving')
-    .addItem('Archive Old Requests (Manual)', 'archiveOldRequests')
-    .addItem('Setup Automatic Archiving', 'setupAutomaticArchivingTrigger')
-    .addItem('Remove Automatic Archiving', 'removeAutomaticArchivingTrigger');
+    .addItem('Archive Old Requests (Manual)', 'archiveOldRequests');
+
+  // Create the "Triggers" submenu
+  const triggerSubMenu = ui.createMenu('Triggers')
+    .addItem('SETUP ALL TRIGGERS', 'setupAllTriggers')
+    .addItem('DELETE ALL TRIGGERS', 'deleteAllTriggers');
 
   // Build the main menu
   mainMenu.addItem('Update Admin Form Staff List', 'updateAdminFormStaffList')
@@ -2512,6 +2700,8 @@ function onOpen() {
     .addSeparator()
     .addItem('Rerun Processing on Row', 'rerunProcessingOnRow')
     .addSeparator()
-    .addSubMenu(archiveSubMenu) // Add the submenu here
+    .addSubMenu(archiveSubMenu)
+    .addSeparator()
+    .addSubMenu(triggerSubMenu)
     .addToUi();
 }
