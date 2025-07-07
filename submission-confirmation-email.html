@@ -53,6 +53,16 @@
           <? } ?>
         </table>
         <p><?= actionMessage ?></p>
+        <? if (typeof cancelUrl !== 'undefined' && cancelUrl) { ?>
+        <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; margin: 20px 0; border-radius: 5px;">
+          <h3 style="color: #b8860b; margin: 0 0 10px 0;">Request Cancellation</h3>
+          <p style="margin: 0 0 15px 0;">If you need to cancel this request while it's still pending approval, you can use the button below:</p>
+          <div style="text-align: center; margin: 15px 0;">
+            <a href="<?= cancelUrl ?>" style="display: inline-block; background-color: #d9534f; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; font-size: 16px; border: none; cursor: pointer;">Cancel This Request</a>
+          </div>
+          <p style="margin: 0; font-size: 0.9em; color: #666;"><strong>Note:</strong> This button will only work if your request is still pending approval. Once approved, rejected, or already cancelled, this button will not work.</p>
+        </div>
+        <? } ?>
         <p>Thank you.</p>
       </div>
       <div class="footer">
