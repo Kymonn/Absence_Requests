@@ -10,16 +10,13 @@
  *            first row of your respective Google Sheets.
  */
 
-// --- General Configuration ---
-const HEADTEACHER_EMAIL        = "kmontiel.staff@sidneystringeracademy.org.uk"; // REPLACE: Headteacher's actual email address.
-const ADMIN_EMAIL_FOR_ERRORS   = "kmontiel.staff@sidneystringeracademy.org.uk"; // Optional: Email for critical error notifications.
-const SENDER_EMAIL             = "absencerequests@sidneystringeracademy.org.uk"; // IMPORTANT: If set, this will be the "from" address on all emails. It MUST be a configured alias for the user running the script.
-const SENDER_NAME              = "Absence Request System";     // The name that appears as the sender.
-const TARGET_CALENDAR_ID       = "c_860cc463977d96c5225672c0d56a6f7585aaa64ddd3c1170a1f71e80c929425f@group.calendar.google.com"; // Specific calendar for absence events.
-const ADMIN_FORM_ID            = "1XRwmIU4n4muXoq10-GLAb8M4RZLa8pKD2V0em96-sLM"; // For use in populating email dropdown
-const STAFF_FORM_ID            = "1D2CQuaqKizLMHotOn73SjHF9eg1w-1AfS3ea0ZvlEsc"; // Staff-facing absence request form.
+// --- MAT Configuration ---
+const MAT_CONFIG_SHEET_ID = "1yc-yNI5HQ3O0r5lzVLQe_-81MDYzGd0o9IGOT9jpclk"; // The single, hardcoded ID of the MAT-level configuration sheet.
+const WEB_APP_URL = "https://script.google.com/a/macros/sidneystringeracademy.org.uk/s/AKfycbwE4vpFOQwl4soCQ7OvuOiGyZ7Ys-WX_sB7gSXUrvM5RFu0rhQ61pszwO7iR_wg2pAO/exec"; // The single, hardcoded URL for the deployed Web App for the entire MAT.
+const ADMIN_EMAIL_FOR_ERRORS   = "kmontiel.staff@sidneystringeracademy.org.uk"; // The email address to send errors to.
+
+// --- Sheet & Script-Wide Constants (These are structural and remain) ---
 const HEADER_ADMIN_NOTIFY_HT   = "Notify Headteacher?";        // The exact question text for the HT notification option on the admin form.
-const WEB_APP_URL              = "https://script.google.com/a/macros/sidneystringeracademy.org.uk/s/AKfycbwE4vpFOQwl4soCQ7OvuOiGyZ7Ys-WX_sB7gSXUrvM5RFu0rhQ61pszwO7iR_wg2pAO/exec";
 
 // --- Sheet Configuration ---
 const REQUEST_LOG_SHEET_NAME   = "Staff Absence Requests Log"; // Name of the master response sheet.
@@ -29,9 +26,7 @@ const STAFF_RESPONSE_SHEET     = "_RawStaffResponses";         // Name of the sh
 const ADMIN_RESPONSE_SHEET     = "_RawAdminResponses";         // Name of the sheet where admin responses land.
 
 // --- Staff Directory Lookup Configuration ---
-const USE_DIRECTORY_LOOKUP       = true;                                         // Set true to use Directory Sheet, false if Line Manager email is on the form.
-const STAFF_DIRECTORY_SHEET_ID   = "1IY-hSAavgJM28o_pWE9GQaoLgm-_S8GYFtlkcytaZ8Y"; // REPLACE: ID of the Staff Directory Google Sheet.
-const STAFF_DIRECTORY_SHEET_NAME = "Directory";                                  // Optional: Specify sheet name if not the first sheet.
+const STAFF_DIRECTORY_SHEET_NAME = "Directory";                // Optional: Specify sheet name if not the first sheet.
 
 // --- Header Names in Staff Directory Sheet (Only used if USE_DIRECTORY_LOOKUP = true) ---
 const HEADER_DIR_STAFF_EMAIL       = "Staff Email";        // Staff email column in the directory.
@@ -94,18 +89,90 @@ const HEADER_HIST_DURATION_DAYS         = "DfE Duration";     // Duration in Day
 const HEADER_HIST_DATE_APPROVED         = "Date Approved";    // Date Approved (Optional for reading from history).
 
 // --- Archiving Configuration ---
-const ARCHIVE_OLDER_THAN_DAYS  = 6; // Archive requests older than this many days.
+const ARCHIVE_OLDER_THAN_DAYS_DEFAULT  = 6; // Default if not specified in config.
 
 // --- Deployment Note ---
 // This script relies on the Web App being deployed with:
-//   Execute as: Me (the script owner, typically the Headteacher or a designated admin)
+//   Execute as: Me (the script owner, typically a designated admin)
 //   Who has access: Anyone [within your domain] (Or restrict as needed, but "Execute as: Me" is key for approver validation)
-// Failure to deploy as "Me" (by the correct account) will break the approval link authorization.
+// The script owner (admin) and the headteacher who approves requests can be different people.
+// Configure both in the MAT Configuration Sheet: HeadteacherEmail and ScriptOwnerEmail.
 // ---
 
 // --- GLOBAL VARIABLES ---
-const SPREADSHEET_ID = "1pbs1aHoiAEBbkVnHDHjXUbd7JuBmJa5KNFW-DhE5Vp8"; // REPLACE: Your actual spreadsheet ID from the URL
-const SCRIPT_CACHE = CacheService.getScriptCache(); // Cache for column indices to improve performance.
+const SCRIPT_CACHE = CacheService.getScriptCache(); // Cache for column indices and config to improve performance.
+
+// =========================================================================
+// CORE CONFIGURATION LOGIC
+// =========================================================================
+
+/**
+ * Fetches, caches, and returns the configuration object for a specific school site.
+ * This is the new core of the multi-tenant system.
+ *
+ * @param {string} identifier The value to look up (e.g., a Spreadsheet ID or a Site ID).
+ * @param {string} [lookupKey='SpreadsheetID'] The header in the MAT config sheet to search within.
+ * @returns {object|null} The configuration object for the site, or null if not found.
+ */
+function getConfig(identifier, lookupKey = 'SpreadsheetID') {
+  if (!identifier) {
+    Logger.log(`getConfig ERROR: Identifier was null or empty. lookupKey: ${lookupKey}`);
+    return null;
+  }
+
+  const cacheKey = `config_${lookupKey}_${identifier}`;
+  try {
+    const cached = SCRIPT_CACHE.get(cacheKey);
+    if (cached) {
+      Logger.log(`getConfig: Cache HIT for key: ${cacheKey}`);
+      return JSON.parse(cached);
+    }
+  } catch (e) {
+    Logger.log(`getConfig: Cache read error for key ${cacheKey}: ${e.message}`);
+    // Proceed to fetch from sheet
+  }
+  
+  Logger.log(`getConfig: Cache MISS for key: ${cacheKey}. Fetching from MAT sheet.`);
+
+  try {
+    const matSheet = SpreadsheetApp.openById(MAT_CONFIG_SHEET_ID).getSheets()[0];
+    const data = matSheet.getDataRange().getValues();
+    const headers = data.shift().map(h => h.trim()); // Get headers and remove from data
+
+    const lookupColIndex = headers.map(h => h.toLowerCase()).indexOf(lookupKey.toLowerCase());
+    if (lookupColIndex === -1) {
+      throw new Error(`Lookup key "${lookupKey}" not found in MAT Config Sheet headers.`);
+    }
+
+    const configRow = data.find(row => String(row[lookupColIndex]).trim() === String(identifier).trim());
+
+    if (configRow) {
+      const config = {};
+      headers.forEach((header, index) => {
+        // Convert PascalCase from sheet to camelCase for JS object keys
+        const camelCaseHeader = header.charAt(0).toLowerCase() + header.slice(1);
+        config[camelCaseHeader] = configRow[index];
+      });
+
+      // Type coercion and setting defaults for robustness
+      config.useDirectoryLookup = (String(config.useDirectoryLookup).toUpperCase() === 'TRUE');
+      config.archiveOlderThanDays = parseInt(config.archiveOlderThanDays, 10) || ARCHIVE_OLDER_THAN_DAYS_DEFAULT;
+      
+      Logger.log(`Successfully fetched config for SiteID: ${config.siteID} (Spreadsheet: ${config.spreadsheetID})`);
+      
+      SCRIPT_CACHE.put(cacheKey, JSON.stringify(config), 21600); // Cache for 6 hours
+      return config;
+    } else {
+      throw new Error(`Configuration for identifier "${identifier}" (using key "${lookupKey}") not found in MAT Config Sheet.`);
+    }
+
+  } catch (error) {
+    Logger.log(`FATAL ERROR in getConfig: ${error.message}\nIdentifier: ${identifier}, LookupKey: ${lookupKey}\nStack: ${error.stack}`);
+    // In a production script, you might notify an admin here.
+    // For now, returning null will stop the process that called it.
+    return null;
+  }
+}
 
 // =========================================================================
 // MAIN ENTRY POINTS & PRIMARY HANDLERS
@@ -119,7 +186,7 @@ const SCRIPT_CACHE = CacheService.getScriptCache(); // Cache for column indices 
  * @param {GoogleAppsScript.Events.SheetsOnFormSubmit} e The event object from the raw sheet.
  * @param {object} sourceOptions Options defining the submission source.
  */
-function _routeFormResponseToMasterLog(e, sourceOptions) {
+function _routeFormResponseToMasterLog(e, sourceOptions, config) {
   if (!e || !e.values) {
     Logger.log(`Router function called with invalid event object for source: ${sourceOptions.submissionSource}. Exiting.`);
     return;
@@ -127,8 +194,8 @@ function _routeFormResponseToMasterLog(e, sourceOptions) {
 
   try {
     const sourceSheet = e.range.getSheet();
-    const masterLogSheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(REQUEST_LOG_SHEET_NAME);
-    if (!masterLogSheet) throw new Error(`Master log sheet "${REQUEST_LOG_SHEET_NAME}" not found.`);
+    const masterLogSheet = SpreadsheetApp.openById(config.spreadsheetID).getSheetByName(REQUEST_LOG_SHEET_NAME);
+    if (!masterLogSheet) throw new Error(`Master log sheet "${REQUEST_LOG_SHEET_NAME}" not found in spreadsheet ${config.spreadsheetID}.`);
 
     // Get the column header-to-index mapping for both the source and master sheets.
     const sourceIndices = getColumnIndices(sourceSheet, sourceSheet.getName());
@@ -174,7 +241,7 @@ function _routeFormResponseToMasterLog(e, sourceOptions) {
     Logger.log(`Routed and mapped submission from '${sourceSheet.getName()}' to master log row ${newRowIndex}.`);
 
     // Call the main handler, passing it the NEW row data from the MASTER sheet.
-    _onFormSubmitHandler(newMasterRow, newRowIndex, masterLogSheet, sourceOptions);
+    _onFormSubmitHandler(newMasterRow, newRowIndex, masterLogSheet, sourceOptions, config);
 
   } catch (error) {
     Logger.log(`FATAL ERROR in _routeFormResponseToMasterLog: ${error.message}\nStack:\n${error.stack}`);
@@ -190,47 +257,59 @@ function _routeFormResponseToMasterLog(e, sourceOptions) {
  * @param {GoogleAppsScript.Events.SheetsOnFormSubmit} e The event object.
  */
 function handleFormSubmissions(e) {
-  // Get the name of the sheet where the new response was added.
-  const sourceSheetName = e.range.getSheet().getName();
-  Logger.log(`Submission received on sheet: "${sourceSheetName}".`);
-
-  // Define the names of your raw response sheets.
-  // IMPORTANT: These must exactly match the names of your tabs.
-  const STAFF_RESPONSE_SHEET = "_RawStaffResponses";
-  const ADMIN_RESPONSE_SHEET = "_RawAdminResponses";
-
-  // Based on the sheet name, call the router with the correct options.
-  if (sourceSheetName === STAFF_RESPONSE_SHEET) {
-    _routeFormResponseToMasterLog(e, {
-      submissionSource: "Staff Form",
-      requiresApproval: true
-    });
-  } else if (sourceSheetName === ADMIN_RESPONSE_SHEET) {
-    // If the Admin form is set to collect emails, the submitter's email will be available
-    // in the event object's namedValues, under the "Email Address" header.
-    let adminEmail = "";
-    if (e.namedValues && e.namedValues[HEADER_STAFF_FORM_EMAIL] && e.namedValues[HEADER_STAFF_FORM_EMAIL][0]) {
-        adminEmail = e.namedValues[HEADER_STAFF_FORM_EMAIL][0];
+  try {
+    const spreadsheetId = e.source.getId();
+    const config = getConfig(spreadsheetId, 'SpreadsheetID');
+    if (!config) {
+        Logger.log(`handleFormSubmissions: Could not retrieve configuration for spreadsheet ID ${spreadsheetId}. Aborting.`);
+        return;
     }
 
-    // Determine if HT approval is required based on the form response.
-    let requiresApproval = false; // Default to the bypass behavior.
-    if (e.namedValues && e.namedValues[HEADER_ADMIN_NOTIFY_HT] && e.namedValues[HEADER_ADMIN_NOTIFY_HT][0]) {
-        const notifyHtResponse = e.namedValues[HEADER_ADMIN_NOTIFY_HT][0].toString().toUpperCase();
-        if (notifyHtResponse === 'TRUE') {
-            requiresApproval = true;
+    // Get the name of the sheet where the new response was added.
+    const sourceSheetName = e.range.getSheet().getName();
+    Logger.log(`Submission received on sheet: "${sourceSheetName}" for site: ${config.siteID}.`);
+
+    // Define the names of your raw response sheets.
+    // IMPORTANT: These must exactly match the names of your tabs.
+    const STAFF_RESPONSE_SHEET = "_RawStaffResponses";
+    const ADMIN_RESPONSE_SHEET = "_RawAdminResponses";
+
+    // Based on the sheet name, call the router with the correct options.
+    if (sourceSheetName === STAFF_RESPONSE_SHEET) {
+        _routeFormResponseToMasterLog(e, {
+        submissionSource: "Staff Form",
+        requiresApproval: true
+        }, config);
+    } else if (sourceSheetName === ADMIN_RESPONSE_SHEET) {
+        // If the Admin form is set to collect emails, the submitter's email will be available
+        // in the event object's namedValues, under the "Email Address" header.
+        let adminEmail = "";
+        if (e.namedValues && e.namedValues[HEADER_STAFF_FORM_EMAIL] && e.namedValues[HEADER_STAFF_FORM_EMAIL][0]) {
+            adminEmail = e.namedValues[HEADER_STAFF_FORM_EMAIL][0];
         }
-    }
 
-    _routeFormResponseToMasterLog(e, {
-      submissionSource: "Admin Form",
-      requiresApproval: requiresApproval,
-      adminSubmitterEmail: adminEmail // Pass the captured email along
-    });
-  } else {
-    // If the submission came from any other sheet, log it and ignore it.
-    Logger.log(`Submission from an untracked sheet ("${sourceSheetName}"). Ignoring.`);
-    return;
+        // Determine if HT approval is required based on the form response.
+        let requiresApproval = false; // Default to the bypass behavior.
+        if (e.namedValues && e.namedValues[HEADER_ADMIN_NOTIFY_HT] && e.namedValues[HEADER_ADMIN_NOTIFY_HT][0]) {
+            const notifyHtResponse = e.namedValues[HEADER_ADMIN_NOTIFY_HT][0].toString().toUpperCase();
+            if (notifyHtResponse === 'TRUE') {
+                requiresApproval = true;
+            }
+        }
+
+        _routeFormResponseToMasterLog(e, {
+        submissionSource: "Admin Form",
+        requiresApproval: requiresApproval,
+        adminSubmitterEmail: adminEmail // Pass the captured email along
+        }, config);
+    } else {
+        // If the submission came from any other sheet, log it and ignore it.
+        Logger.log(`Submission from an untracked sheet ("${sourceSheetName}"). Ignoring.`);
+        return;
+    }
+  } catch (error) {
+      Logger.log(`FATAL ERROR in handleFormSubmissions: ${error.message}\nStack:\n${error.stack}`);
+      // Consider notifying a central admin about this top-level failure
   }
 }
 
@@ -242,7 +321,7 @@ function handleFormSubmissions(e) {
  * @param {Sheet} requestSheet The sheet object for the master log.
  * @param {object} sourceOptions Options defining the submission source.
  */
-function _onFormSubmitHandler(rowData, rowIndex, requestSheet, sourceOptions) {
+function _onFormSubmitHandler(rowData, rowIndex, requestSheet, sourceOptions, config) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {
     Logger.log("Could not acquire lock for form submission. Exiting.");
@@ -281,9 +360,10 @@ function _onFormSubmitHandler(rowData, rowIndex, requestSheet, sourceOptions) {
 
     const webAppUrl = WEB_APP_URL;
     if (sourceOptions.requiresApproval && !webAppUrl) {
-      Logger.log("ERROR: WEB_APP_URL constant is not set. Approval links cannot be generated.");
-      notifyAdmin("Absence Script ERROR: WEB_APP_URL constant is not set. Approval links cannot be generated.");
-      requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()]).setValue('Error - Configure WEB_APP_URL');
+      const errorMessage = "Approval links cannot be generated because the script has not been deployed as a web app, or the WEB_APP_URL constant is not set.";
+      Logger.log(`ERROR: ${errorMessage}`);
+      notifyAdmin(`Absence Script ERROR: ${errorMessage}`, config);
+      requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()]).setValue('Error - Configure Web App');
       lock.releaseLock();
       return;
     }
@@ -306,15 +386,17 @@ function _onFormSubmitHandler(rowData, rowIndex, requestSheet, sourceOptions) {
       submissionSource: sourceOptions.submissionSource,
       webAppUrl: webAppUrl,
       absenceDetailsOnDate: absenceDetailsOnDate,
-      adminSubmitterEmail: sourceOptions.adminSubmitterEmail, // Pass email through
-      siteId: sourceOptions.siteId || 'default' // Pass site ID for cancellation URL
+      adminSubmitterEmail: sourceOptions.adminSubmitterEmail,
+      siteId: config.siteID, // Pass site ID for cancellation URL
+      useDirectoryLookup: config.useDirectoryLookup // Pass lookup setting
     };
 
-    _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, processingOptions);
+    _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, processingOptions, config);
 
   } catch (error) {
     Logger.log(`FATAL ERROR in _onFormSubmitHandler: ${error.message}\nStack:\n${error.stack}`);
-    notifyAdmin(`Absence Script CRITICAL Failure in form processing: ${error.message}`);
+    // We don't have config here on a fatal error, so we can't notify the admin.
+    // Logging is the best we can do.
     try {
       if (requestSheet && rowIndex && logIndices && logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()]) {
         if (typeof rowIndex === 'number' && rowIndex > 1) {
@@ -336,18 +418,30 @@ function doGet(e) {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {
     Logger.log("doGet could not acquire lock. Server may be busy.");
-    return createHtmlResponse("Server Busy", "The server is busy processing another request. Please try again in a moment.", "#ff9800");
+    return createHtmlResponse("Server Busy", "The server is busy processing another request. Please try again in a moment.", "#ff9800", null);
   }
 
   let message = "An error occurred processing your request. Please contact the administrator.";
   let title = "Absence Request Processing Error";
   let bgColor = "#f44336";
   let requestSheet;
+  let config; // Declare config in the outer scope
 
   try {
     // --- Parameter and Security Validation ---
     const params = e.parameter;
     const { action, row: rowParam, approver: approverParam, comment, site, user } = params;
+
+    // The 'site' parameter is now mandatory for all actions.
+    if (!site) {
+        throw new Error("Invalid Link: The request is missing the 'site' identifier and cannot be processed.");
+    }
+
+    config = getConfig(site, 'siteID');
+    if (!config) {
+        throw new Error(`Configuration Error: Could not find configuration for site '${site}'. The request cannot be processed.`);
+    }
+
     const isCommentProvided = typeof comment !== 'undefined';
     const commentParam = isCommentProvided ? (comment || "").trim() : "";
 
@@ -370,17 +464,20 @@ function doGet(e) {
     const activeUser = Session.getActiveUser()?.getEmail();
     const effectiveUser = Session.getEffectiveUser()?.getEmail();
 
+    // Check that the script is running as the configured script owner (admin)
+    const expectedScriptOwner = config.scriptOwnerEmail || config.headteacherEmail; // Fallback to headteacher if not configured
+    
     // Different authentication for cancellation requests
     if (action === 'cancel') {
-      if (!effectiveUser || effectiveUser.toLowerCase() !== HEADTEACHER_EMAIL.toLowerCase()) {
-        Logger.log(`SECURITY ALERT: doGet executed by effective user ${effectiveUser}, but script is configured for HEADTEACHER_EMAIL ${HEADTEACHER_EMAIL}. Check deployment settings (must be 'Execute as: Me' by the configured Headteacher).`);
-        throw new Error(`Configuration Error: The script is not running as the designated Headteacher (${HEADTEACHER_EMAIL}). Please contact the administrator to correct the script deployment settings.`);
+      if (!effectiveUser || effectiveUser.toLowerCase() !== expectedScriptOwner.toLowerCase()) {
+        Logger.log(`SECURITY ALERT: doGet executed by effective user ${effectiveUser}, but script is configured for SCRIPT_OWNER_EMAIL ${expectedScriptOwner}. Check deployment settings (must be 'Execute as: Me' by the configured Script Owner).`);
+        throw new Error(`Configuration Error: The script is not running as the designated Script Owner (${expectedScriptOwner}). Please contact the administrator to correct the script deployment settings.`);
       }
       // For cancellation, we don't need to check activeUser vs approver, we'll validate against the original requester
     } else {
-      if (!effectiveUser || effectiveUser.toLowerCase() !== HEADTEACHER_EMAIL.toLowerCase()) {
-        Logger.log(`SECURITY ALERT: doGet executed by effective user ${effectiveUser}, but script is configured for HEADTEACHER_EMAIL ${HEADTEACHER_EMAIL}. Check deployment settings (must be 'Execute as: Me' by the configured Headteacher).`);
-        throw new Error(`Configuration Error: The script is not running as the designated Headteacher (${HEADTEACHER_EMAIL}). Please contact the administrator to correct the script deployment settings.`);
+      if (!effectiveUser || effectiveUser.toLowerCase() !== expectedScriptOwner.toLowerCase()) {
+        Logger.log(`SECURITY ALERT: doGet executed by effective user ${effectiveUser}, but script is configured for SCRIPT_OWNER_EMAIL ${expectedScriptOwner}. Check deployment settings (must be 'Execute as: Me' by the configured Script Owner).`);
+        throw new Error(`Configuration Error: The script is not running as the designated Script Owner (${expectedScriptOwner}). Please contact the administrator to correct the script deployment settings.`);
       }
       if (!activeUser || activeUser.toLowerCase() !== decodedApprover.toLowerCase()) {
         Logger.log(`Access Denied: Active user (${activeUser}) does not match the approver in the link (${decodedApprover}). Effective user: ${effectiveUser}.`);
@@ -389,14 +486,13 @@ function doGet(e) {
     }
 
     // If the comment form hasn't been submitted yet, show it (except for cancellation requests).
-    const webAppUrl = WEB_APP_URL
     if (!isCommentProvided && action !== 'cancel') {
       Logger.log(`Comment not provided for action ${action}, row ${rowIndex}. Displaying comment prompt page.`);
-      return createCommentPromptPage(action, rowIndex, decodedApprover, webAppUrl);
+      return createCommentPromptPage(action, rowIndex, decodedApprover, WEB_APP_URL, site);
     }
 
     // --- Sheet and Data Validation ---
-    requestSheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(REQUEST_LOG_SHEET_NAME);
+    requestSheet = SpreadsheetApp.openById(config.spreadsheetID).getSheetByName(REQUEST_LOG_SHEET_NAME);
     if (!requestSheet) throw new Error(`Sheet "${REQUEST_LOG_SHEET_NAME}" not found.`);
 
     const logIndices = getColumnIndices(requestSheet, REQUEST_LOG_SHEET_NAME);
@@ -432,7 +528,7 @@ function doGet(e) {
         title = "Request Cannot Be Cancelled";
         message = `This request cannot be cancelled because its current status is "${currentStatus}". Only requests with status "Pending Approval" can be cancelled.`;
         bgColor = "#ff9800"; // Orange for warning
-        return createHtmlResponse(title, message, bgColor);
+        return createHtmlResponse(title, message, bgColor, config);
       }
       
       // Immediately update the status to prevent race conditions
@@ -472,24 +568,29 @@ function doGet(e) {
           `;
           
           // Get the thread by message ID and reply to it
-          const thread = GmailApp.getMessageById(approvalEmailId).getThread();
-          thread.reply(replyBody, {
+          const message = GmailApp.getMessageById(approvalEmailId);
+          const headteacherEmail = message.getTo();
+          
+          const draft = message.createDraftReply(replyBody, {
             htmlBody: replyBody,
-            from: SENDER_EMAIL && isValidEmail(SENDER_EMAIL) ? SENDER_EMAIL : undefined,
-            name: SENDER_NAME || 'Absence Request System'
+            from: config.senderEmail && isValidEmail(config.senderEmail) ? config.senderEmail : undefined,
+            name: config.senderName || 'Absence Request System',
+            bcc: headteacherEmail // BCC the headteacher to ensure they receive the threaded reply.
           });
+
+          draft.send();
           
           Logger.log(`Sent cancellation reply to approval email thread for row ${rowIndex}`);
         } catch (replyError) {
           Logger.log(`Error sending cancellation reply for row ${rowIndex}: ${replyError.message}`);
-          notifyAdmin(`Absence Script Warning: Failed to send cancellation reply for row ${rowIndex}. Error: ${replyError.message}`);
+          notifyAdmin(`Absence Script Warning: Failed to send cancellation reply for row ${rowIndex}. Error: ${replyError.message}`, config);
         }
       }
       
       title = "Request Successfully Cancelled";
       message = `Your absence request has been successfully cancelled. The approver has been notified, and no further action is required.`;
       bgColor = "#4CAF50"; // Green for success
-      return createHtmlResponse(title, message, bgColor);
+      return createHtmlResponse(title, message, bgColor, config);
     }
 
     // --- Continue with existing approval/rejection logic ---
@@ -502,7 +603,7 @@ function doGet(e) {
       title = "Absence Request Already Processed";
       message = `Request for row ${rowIndex} has already been processed with status: ${currentStatus}.\nNo further action has been taken.`;
       bgColor = (currentStatus === 'Approved') ? '#4CAF50' : '#ff9800'; // Orange for already rejected/cancelled
-      return createHtmlResponse(title, message, bgColor);
+      return createHtmlResponse(title, message, bgColor, config);
     }
 
     // --- Process Action ---
@@ -552,14 +653,14 @@ function doGet(e) {
         const eventEndDateTime = combineDateAndTime(eventEndDateRaw, eventEndTimeRaw);
 
         if (staffNameValue && eventStartDateTime instanceof Date && !isNaN(eventStartDateTime) && eventEndDateTime instanceof Date && !isNaN(eventEndDateTime)) {
-          createCalendarEvent(staffNameValue.toString(), eventStartDateTime, eventEndDateTime, eventAbsenceType.toString(), activeUser, commentParam);
+          createCalendarEvent(staffNameValue.toString(), eventStartDateTime, eventEndDateTime, eventAbsenceType.toString(), activeUser, commentParam, config);
         } else {
           Logger.log(`Skipping calendar event creation for row ${rowIndex} due to missing data. Staff: '${staffNameValue}', Start: ${eventStartDateTime}, End: ${eventEndDateTime}`);
-          notifyAdmin(`Absence Script Calendar Warning: Could not create event for row ${rowIndex} due to missing staff name or invalid dates.`);
+          notifyAdmin(`Absence Script Calendar Warning: Could not create event for row ${rowIndex} due to missing staff name or invalid dates.`, config);
         }
       } catch (calError) {
         Logger.log(`Error during calendar event creation call for row ${rowIndex}: ${calError.message}\nStack: ${calError.stack}`);
-        notifyAdmin(`Absence Script ERROR: Failed to initiate calendar event creation for row ${rowIndex}. Error: ${calError.message}`);
+        notifyAdmin(`Absence Script ERROR: Failed to initiate calendar event creation for row ${rowIndex}. Error: ${calError.message}`, config);
       }
     }
 
@@ -597,7 +698,7 @@ function doGet(e) {
           subject: requesterSubject,
           htmlBody: htmlRequesterBody
         };
-        _sendConfiguredEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions, false, config);
 
         Logger.log(`Sent HTML decision notification ('${decisionText}') to requester ${requesterEmail} for row ${rowIndex}. Comment included: ${!!commentParam}`);
         message += `\n\nThe staff member (${requesterEmail}) has been notified.`;
@@ -605,13 +706,13 @@ function doGet(e) {
         Logger.log(`WARNING: Could not notify requester for row ${rowIndex}. Invalid email found: '${requesterEmail}'`);
         message += `\n\nWARNING: Could not notify staff member (invalid email: '${requesterEmail}'). Please inform them manually.`;
         bgColor = "#ff9800"; // Orange warning
-        notifyAdmin(`Absence Script WARNING: Failed to send decision email for row ${rowIndex} to invalid address: '${requesterEmail}'`);
+        notifyAdmin(`Absence Script WARNING: Failed to send decision email for row ${rowIndex} to invalid address: '${requesterEmail}'`, config);
       }
     } catch (notifyError) {
       Logger.log(`ERROR sending notification to requester for row ${rowIndex}: ${notifyError.message}\nStack: ${notifyError.stack}`);
       message += `\n\nWARNING: An error occurred sending the notification email to the staff member. Error: ${notifyError.message}`;
       bgColor = "#ff9800"; // Orange warning
-      notifyAdmin(`Absence Script ERROR: Failed to send decision email for row ${rowIndex}. Error: ${notifyError.message}`);
+      notifyAdmin(`Absence Script ERROR: Failed to send decision email for row ${rowIndex}. Error: ${notifyError.message}`, config);
     }
 
   } catch (error) {
@@ -619,12 +720,12 @@ function doGet(e) {
     message = `An error occurred: ${error.message}. Please contact the administrator. Check script logs for details.`;
     title = "Absence Request Processing Error";
     bgColor = "#f44336"; // Red error
-    notifyAdmin(`Absence Script CRITICAL Failure in doGet: ${error.message}. Parameters: ${e ? JSON.stringify(e.parameter) : 'N/A'}`);
+    notifyAdmin(`Absence Script CRITICAL Failure in doGet: ${error.message}. Parameters: ${e ? JSON.stringify(e.parameter) : 'N/A'}`, config);
   } finally {
     lock.releaseLock();
   }
 
-  return createHtmlResponse(title, message, bgColor);
+  return createHtmlResponse(title, message, bgColor, config);
 }
 
 // =========================================================================
@@ -635,11 +736,11 @@ function doGet(e) {
  * CORE LOGIC for processing an absence row.
  * Handles data validation, calculations, notifications, and sheet updates.
  */
-function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, options) {
+function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, options, config) {
   try {
     // --- Header Validation ---
     const requiredCoreHeaders = [HEADER_LOG_TIMESTAMP, HEADER_MASTER_LOG_EMAIL, HEADER_LOG_STAFF_NAME, HEADER_LOG_ABSENCE_START_DATE, HEADER_LOG_ABSENCE_START_TIME, HEADER_LOG_ABSENCE_END_DATE, HEADER_LOG_ABSENCE_END_TIME, HEADER_LOG_ABSENCE_TYPE, HEADER_LOG_REASON, HEADER_LOG_APPROVAL_STATUS, HEADER_LOG_PAY_STATUS, HEADER_LOG_LM_NOTIFIED, HEADER_LOG_HT_NOTIFIED, HEADER_LOG_APPROVAL_DATE, HEADER_LOG_APPROVER_EMAIL, HEADER_LOG_DURATION_HOURS, HEADER_LOG_APPROVER_COMMENT, HEADER_LOG_EVIDENCE_FILE, HEADER_LOG_SUBMISSION_SOURCE, HEADER_LOG_APPROVAL_EMAIL_ID];
-    if (!USE_DIRECTORY_LOOKUP && !logIndices[HEADER_LOG_LM_EMAIL_FORM.toLowerCase()]) {
+    if (!options.useDirectoryLookup && !logIndices[HEADER_LOG_LM_EMAIL_FORM.toLowerCase()]) {
       requiredCoreHeaders.push(HEADER_LOG_LM_EMAIL_FORM);
     }
     if (!validateRequiredHeaders(logIndices, requiredCoreHeaders, REQUEST_LOG_SHEET_NAME)) {
@@ -661,7 +762,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
       Logger.log(`Admin submission detected. Invalid request notifications for row ${rowIndex} will be sent to admin: ${emailForInvalidNotification}`);
     }
 
-    const staffDirectoryInfo = USE_DIRECTORY_LOOKUP ? getStaffDirectoryInfoByEmail(submitterEmail) : null;
+    const staffDirectoryInfo = options.useDirectoryLookup ? getStaffDirectoryInfoByEmail(submitterEmail, config) : null;
     let staffDisplayName = rowData[logIndices[HEADER_LOG_STAFF_NAME.toLowerCase()] - 1];
 
     if ((!staffDisplayName || String(staffDisplayName).trim() === "") && staffDirectoryInfo && staffDirectoryInfo.staffMemberName) {
@@ -739,7 +840,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: 'Absence Request Invalid: Start Date Too Far In Past',
             htmlBody: htmlBody
         };
-        _sendConfiguredEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions, false, config);
       }
       Logger.log(`Row ${rowIndex}: ${errorMessage}`);
       return;
@@ -764,7 +865,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: 'Absence Request Invalid: Start Date Too Far In Future',
             htmlBody: htmlBody
         };
-        _sendConfiguredEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions, false, config);
       }
       Logger.log(`Row ${rowIndex}: ${errorMessage}`);
       return;
@@ -772,7 +873,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
 
     // Request starts on a non-working day
     // A day is considered a working day if there is at least one valid time range.
-    if (USE_DIRECTORY_LOOKUP && staffDirectoryInfo && staffDirectoryInfo.days) {
+    if (options.useDirectoryLookup && staffDirectoryInfo && staffDirectoryInfo.days) {
       const dayOfWeek = Utilities.formatDate(startDateTime, Session.getScriptTimeZone(), 'EEEE').toLowerCase();
       const workScheduleForDay = staffDirectoryInfo.days[dayOfWeek];
 
@@ -808,7 +909,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
                 subject: 'Absence Request Invalid: Non-working Day',
                 htmlBody: htmlBody
             };
-            _sendConfiguredEmail(mailOptions);
+            _sendConfiguredEmail(mailOptions, false, config);
         }
         Logger.log(`Row ${rowIndex}: ${errorMessage}`);
         return;
@@ -829,7 +930,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: 'Absence Request Invalid: End date/time is before start date/time',
             htmlBody: htmlBody
         };
-        _sendConfiguredEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions, false, config);
       }
       Logger.log(`Row ${rowIndex}: End date/time (${endDateTime}) is before start date/time (${startDateTime}).`);
       return;
@@ -850,7 +951,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: 'Absence Request Invalid: Zero-Length Absence',
             htmlBody: htmlBody
         };
-        _sendConfiguredEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions, false, config);
       }
       Logger.log(`Row ${rowIndex}: ${errorMessage}`);
       return;
@@ -890,7 +991,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: 'Absence Request Invalid: Overlapping Absence Detected',
             htmlBody: htmlBody.replace(/\n/g, '<br>') // For the list of overlaps
         };
-        _sendConfiguredEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions, false, config);
       }
       Logger.log(`Row ${rowIndex}: Overlapping request(s) found. Details: ${summaryText}`);
       return;
@@ -899,7 +1000,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
     // --- Calculations ---
     let durationHours = 0;
     try {
-      durationHours = calculateAbsenceHoursFromSchedule(submitterEmail, startDateTime, endDateTime);
+      durationHours = calculateAbsenceHoursFromSchedule(submitterEmail, startDateTime, endDateTime, config);
       requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_DURATION_HOURS.toLowerCase()]).setValue(parseFloat(durationHours.toFixed(2)));
     } catch (calcError) {
       Logger.log(`Error calculating duration (hours) for row ${rowIndex}: ${calcError.message}`);
@@ -910,7 +1011,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
     let roundedDurationDays = null;
     if (logIndices[HEADER_LOG_DURATION_DAYS.toLowerCase()]) {
       try {
-        const durationDays = calculateAbsenceDays(submitterEmail, startDateTime, endDateTime);
+        const durationDays = calculateAbsenceDays(submitterEmail, startDateTime, endDateTime, config);
         roundedDurationDays = Math.round(durationDays * 100) / 100;
         requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_DURATION_DAYS.toLowerCase()]).setValue(roundedDurationDays);
       } catch (err) {
@@ -922,7 +1023,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
 
     // --- Notification Preparation ---
     let lineManagerEmail = null;
-    if (USE_DIRECTORY_LOOKUP) {
+    if (options.useDirectoryLookup) {
       lineManagerEmail = staffDirectoryInfo ? staffDirectoryInfo.lineManagerEmail : null;
     } else if (logIndices[HEADER_LOG_LM_EMAIL_FORM.toLowerCase()]) {
       lineManagerEmail = rowData[logIndices[HEADER_LOG_LM_EMAIL_FORM.toLowerCase()] - 1];
@@ -930,12 +1031,12 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
     if (lineManagerEmail && typeof lineManagerEmail === 'string' && !isValidEmail(lineManagerEmail.trim())) {
       lineManagerEmail = null;
     }
-    if (USE_DIRECTORY_LOOKUP && !lineManagerEmail && options.notifyLM) {
-      notifyAdmin(`Absence Alert: Could not find Line Manager for ${submitterEmail} (Row ${rowIndex}) in Staff Directory for notification.`);
+    if (options.useDirectoryLookup && !lineManagerEmail && options.notifyLM) {
+      notifyAdmin(`Absence Alert: Could not find Line Manager for ${submitterEmail} (Row ${rowIndex}) in Staff Directory for notification.`, config);
     }
 
-    const historySummary = calculateAbsenceHistoryCategorized(HISTORY_SHEET_NAME, submitterEmail, startDateTime);
-    const timestampFormat = "yyyy-MM-dd HH:mm:ss";
+    const historySummary = calculateAbsenceHistoryCategorized(HISTORY_SHEET_NAME, submitterEmail, startDateTime, config);
+    const timestampFormat = "yyyy-mm-dd hh:mm:ss";
     const tz = Session.getScriptTimeZone();
     const formattedStartDate = Utilities.formatDate(startDateTime, tz, "dd/MM/yyyy");
     const formattedStartTime = Utilities.formatDate(startDateTime, tz, "HH:mm");
@@ -967,7 +1068,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
       requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVER_EMAIL.toLowerCase()]).setValue(adminSubmitter);
       
       // Create the calendar event immediately
-      createCalendarEvent(staffDisplayName, startDateTime, endDateTime, absenceType, adminSubmitter, 'Logged directly by admin.');
+      createCalendarEvent(staffDisplayName, startDateTime, endDateTime, absenceType, adminSubmitter, 'Logged directly by admin.', config);
       
       // Notify Line Manager for info
       if (options.notifyLM && lineManagerEmail) {
@@ -990,7 +1091,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: `Absence Logged (Info Only): ${staffDisplayName}`,
             htmlBody: htmlBody
           };
-          _sendConfiguredEmail(mailOptions);
+          _sendConfiguredEmail(mailOptions, false, config);
 
           if (logIndices[HEADER_LOG_LM_NOTIFIED.toLowerCase()]) requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_LM_NOTIFIED.toLowerCase()]).setValue(now).setNumberFormat(timestampFormat);
         } catch (errLm) { Logger.log(`Row ${rowIndex}: ERROR sending admin-logged LM email: ${errLm.message}`); }
@@ -1017,12 +1118,12 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: `Absence Logged on Your Behalf (${formattedStartDate})`,
             htmlBody: htmlBody
           };
-          _sendConfiguredEmail(mailOptions);
+          _sendConfiguredEmail(mailOptions, false, config);
           
           Logger.log(`Row ${rowIndex}: Sent admin-logged submission confirmation to staff member ${submitterEmail}.`);
         } catch (errStaff) {
           Logger.log(`Row ${rowIndex}: ERROR sending admin-logged staff confirmation email: ${errStaff.message}`);
-          notifyAdmin(`Absence Script ERROR: Failed to send admin-logged confirmation to ${submitterEmail} for row ${rowIndex}. Error: ${errStaff.message}`);
+          notifyAdmin(`Absence Script ERROR: Failed to send admin-logged confirmation to ${submitterEmail} for row ${rowIndex}. Error: ${errStaff.message}`, config);
         }
       }
       
@@ -1033,8 +1134,8 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
     // Standard request notification process
     let htNotificationSent = false;
     let approvalEmailId = null;
-    if (options.notifyHT && isValidEmail(HEADTEACHER_EMAIL) && options.webAppUrl) {
-      const emailOptionsForHT = { to: HEADTEACHER_EMAIL, subject: `Absence Request ACTION REQUIRED: ${staffDisplayName}`, attachments: [] };
+    if (options.notifyHT && isValidEmail(config.headteacherEmail) && options.webAppUrl) {
+      const emailOptionsForHT = { to: config.headteacherEmail, subject: `Absence Request ACTION REQUIRED: ${staffDisplayName}`, attachments: [] };
       
       const detailsMap = {
         "Staff Member": `${staffDisplayName} (${submitterEmail})`,
@@ -1054,13 +1155,13 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
       template.requestDetailsTableHtml = requestDetailsTableHtml;
       template.historySummary = historySummary;
       template.formattedStartDate = formattedStartDate;
-      template.approvePaidUrl = `${options.webAppUrl}?action=approve_paid&row=${rowIndex}&approver=${encodeURIComponent(HEADTEACHER_EMAIL)}`;
-      template.approveUnpaidUrl = `${options.webAppUrl}?action=approve_unpaid&row=${rowIndex}&approver=${encodeURIComponent(HEADTEACHER_EMAIL)}`;
-      template.rejectUrl = `${options.webAppUrl}?action=reject&row=${rowIndex}&approver=${encodeURIComponent(HEADTEACHER_EMAIL)}`;
-      template.otherUrl = `${options.webAppUrl}?action=other_specify&row=${rowIndex}&approver=${encodeURIComponent(HEADTEACHER_EMAIL)}`;
+      template.approvePaidUrl = `${options.webAppUrl}?action=approve_paid&row=${rowIndex}&approver=${encodeURIComponent(config.headteacherEmail)}&site=${config.siteID}`;
+      template.approveUnpaidUrl = `${options.webAppUrl}?action=approve_unpaid&row=${rowIndex}&approver=${encodeURIComponent(config.headteacherEmail)}&site=${config.siteID}`;
+      template.rejectUrl = `${options.webAppUrl}?action=reject&row=${rowIndex}&approver=${encodeURIComponent(config.headteacherEmail)}&site=${config.siteID}`;
+      template.otherUrl = `${options.webAppUrl}?action=other_specify&row=${rowIndex}&approver=${encodeURIComponent(config.headteacherEmail)}&site=${config.siteID}`;
       template.approvedListHtml = _generateRequestListHtml(options.absenceDetailsOnDate.approved);
       template.pendingListHtml = _generateRequestListHtml(options.absenceDetailsOnDate.pending);
-      template.calendarLink = `https://calendar.google.com/calendar/u/0/embed?src=${encodeURIComponent(TARGET_CALENDAR_ID)}&ctz=Europe/London`;
+      template.calendarLink = `https://calendar.google.com/calendar/u/0/embed?src=${encodeURIComponent(config.targetCalendarID)}&ctz=Europe/London`;
       template.evidenceAttached = false;
       template.evidenceError = '';
 
@@ -1076,14 +1177,14 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
           }
         } catch (fileError) {
           template.evidenceError = `Failed to attach evidence: ${evidenceFileUrlOrId}. Error: ${fileError.message}`;
-          notifyAdmin(`Absence Script WARNING: Failed to attach evidence for row ${rowIndex}. Error: ${fileError.message}`);
+          notifyAdmin(`Absence Script WARNING: Failed to attach evidence for row ${rowIndex}. Error: ${fileError.message}`, config);
         }
       }
       
       emailOptionsForHT.htmlBody = template.evaluate().getContent();
 
       try {
-        approvalEmailId = _sendConfiguredEmail(emailOptionsForHT, true);
+        approvalEmailId = _sendConfiguredEmail(emailOptionsForHT, true, config);
 
         if (logIndices[HEADER_LOG_HT_NOTIFIED.toLowerCase()]) requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_HT_NOTIFIED.toLowerCase()]).setValue(new Date()).setNumberFormat(timestampFormat);
         
@@ -1094,7 +1195,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
         
         htNotificationSent = true;
       } catch (errHt) {
-        notifyAdmin(`Absence Script ERROR: Failed to send approval email to HT for row ${rowIndex}. Error: ${errHt.message}`);
+        notifyAdmin(`Absence Script ERROR: Failed to send approval email to HT for row ${rowIndex}. Error: ${errHt.message}`, config);
       }
     }
 
@@ -1125,7 +1226,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
         
         // Generate the cancellation URL for staff-initiated requests
         if (options.submissionSource === 'Staff Form' && options.webAppUrl) {
-          template.cancelUrl = `${options.webAppUrl}?action=cancel&row=${rowIndex}&site=${encodeURIComponent(options.siteId || 'default')}&user=${encodeURIComponent(submitterEmail)}`;
+          template.cancelUrl = `${options.webAppUrl}?action=cancel&row=${rowIndex}&site=${encodeURIComponent(options.siteId)}&user=${encodeURIComponent(submitterEmail)}`;
         }
         
         const htmlBody = template.evaluate().getContent();
@@ -1135,7 +1236,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: subject,
             htmlBody: htmlBody
         };
-        _sendConfiguredEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions, false, config);
 
         Logger.log(`Row ${rowIndex}: Sent pending submission confirmation email to ${submitterEmail} for source '${options.submissionSource}'.`);
       } catch (errConfirm) {
@@ -1165,7 +1266,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
             subject: `Absence Request Submitted (Info Only): ${staffDisplayName}`,
             htmlBody: htmlBody
         };
-        _sendConfiguredEmail(mailOptions);
+        _sendConfiguredEmail(mailOptions, false, config);
         
         if (logIndices[HEADER_LOG_LM_NOTIFIED.toLowerCase()]) requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_LM_NOTIFIED.toLowerCase()]).setValue(new Date()).setNumberFormat(timestampFormat);
       } catch (errLm) {
@@ -1176,7 +1277,7 @@ function _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, o
 
   } catch (coreError) {
     Logger.log(`CORE PROCESSING ERROR for Row ${rowIndex}: ${coreError.message}\nStack: ${coreError.stack}`);
-    notifyAdmin(`Absence Script CRITICAL Failure in _handleAbsenceProcessing for row ${rowIndex}: ${coreError.message}`);
+    notifyAdmin(`Absence Script CRITICAL Failure in _handleAbsenceProcessing for row ${rowIndex}: ${coreError.message}`, config);
     try {
       if (requestSheet && logIndices && logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()]) {
         requestSheet.getRange(rowIndex, logIndices[HEADER_LOG_APPROVAL_STATUS.toLowerCase()]).setValue('Fatal Error - Check Core Logs');
@@ -1237,20 +1338,20 @@ function _generateRequestListHtml(requests) {
     return `<ul style="margin: 0; padding-left: 40px; list-style-type: disc;">${listItems}</ul>`;
 }
 
-function createHtmlResponse(title, message, bgColor) {
+function createHtmlResponse(title, message, bgColor, config) {
   const displayMessage = message.replace(/\n/g, '<br>');
   const template = HtmlService.createTemplateFromFile('html-response.html');
   template.title = title;
   template.displayMessage = displayMessage;
   template.bgColor = bgColor;
-  template.SPREADSHEET_ID = SPREADSHEET_ID;
+  template.SPREADSHEET_ID = config ? config.spreadsheetID : null;
 
   const html = template.evaluate();
   html.setTitle(title).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
   return html;
 }
 
-function createCommentPromptPage(action, row, approverEmail, webAppUrl) {
+function createCommentPromptPage(action, row, approverEmail, webAppUrl, siteId) {
   let actionText = "process";
   if (action.startsWith('approve_paid')) actionText = "approve with pay";
   else if (action.startsWith('approve_unpaid')) actionText = "approve without pay";
@@ -1265,6 +1366,7 @@ function createCommentPromptPage(action, row, approverEmail, webAppUrl) {
   template.webAppUrl = webAppUrl;
   template.action = action;
   template.approverEmail = encodeURIComponent(approverEmail);
+  template.site = siteId;
 
   const html = template.evaluate();
   html.setTitle(title).setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
@@ -1474,16 +1576,16 @@ function getAbsenceDetailsForDate(sheet, logIndices, targetRequestStartDate, cur
 // STAFF DIRECTORY & USER INFORMATION HELPERS
 // =========================================================================
 
-function getStaffDirectoryInfoByEmail(staffEmail) {
-  if (!staffEmail || !USE_DIRECTORY_LOOKUP || !STAFF_DIRECTORY_SHEET_ID) return null;
+function getStaffDirectoryInfoByEmail(staffEmail, config) {
+  if (!staffEmail || !config.useDirectoryLookup || !config.staffDirectorySheetID) return null;
   staffEmail = String(staffEmail).trim().toLowerCase();
   let dirSheet;
   try {
-    dirSheet = STAFF_DIRECTORY_SHEET_NAME ? SpreadsheetApp.openById(STAFF_DIRECTORY_SHEET_ID).getSheetByName(STAFF_DIRECTORY_SHEET_NAME) : SpreadsheetApp.openById(STAFF_DIRECTORY_SHEET_ID).getSheets()[0];
+    dirSheet = STAFF_DIRECTORY_SHEET_NAME ? SpreadsheetApp.openById(config.staffDirectorySheetID).getSheetByName(STAFF_DIRECTORY_SHEET_NAME) : SpreadsheetApp.openById(config.staffDirectorySheetID).getSheets()[0];
     if (!dirSheet) { Logger.log(`Dir sheet "${STAFF_DIRECTORY_SHEET_NAME || 'First'}" not found.`); return null; }
-  } catch (e) { Logger.log(`Error accessing Dir Sheet: ${e}`); notifyAdmin(`Absence: Error accessing Staff Directory: ${e.message}`); return null; }
+  } catch (e) { Logger.log(`Error accessing Dir Sheet: ${e}`); notifyAdmin(`Absence: Error accessing Staff Directory: ${e.message}`, config); return null; }
   try {
-    const dirIndices = getColumnIndices(dirSheet, `dir_${STAFF_DIRECTORY_SHEET_ID}_${STAFF_DIRECTORY_SHEET_NAME || 'FirstSheet'}`);
+    const dirIndices = getColumnIndices(dirSheet, `dir_${config.staffDirectorySheetID}_${STAFF_DIRECTORY_SHEET_NAME || 'FirstSheet'}`);
     const reqDirHeaders = [HEADER_DIR_STAFF_EMAIL, HEADER_DIR_LM_EMAIL, HEADER_DIR_STATUS, HEADER_DIR_LEAVING_DATE, HEADER_DIR_STAFF_MEMBER_NAME, HEADER_DIR_TEACHING_SUPPORT, HEADER_DIR_DEPARTMENT, HEADER_DIR_MONDAY, HEADER_DIR_TUESDAY, HEADER_DIR_WEDNESDAY, HEADER_DIR_THURSDAY, HEADER_DIR_FRIDAY, HEADER_DIR_SATURDAY, HEADER_DIR_SUNDAY];
     if (!validateRequiredHeaders(dirIndices, reqDirHeaders, dirSheet.getName())) return null;
     const lastRow = dirSheet.getLastRow();
@@ -1514,7 +1616,7 @@ function getStaffDirectoryInfoByEmail(staffEmail) {
       }
     }
     return null;
-  } catch (e) { Logger.log(`Error processing Dir Sheet: ${e}\n${e.stack}`); notifyAdmin(`Absence: Error processing Staff Directory for ${staffEmail}: ${e.message}`); return null; }
+  } catch (e) { Logger.log(`Error processing Dir Sheet: ${e}\n${e.stack}`); notifyAdmin(`Absence: Error processing Staff Directory for ${staffEmail}: ${e.message}`, config); return null; }
 }
 
 // =========================================================================
@@ -1591,10 +1693,10 @@ function doDateRangesOverlap(startA, endA, startB, endB) {
   return (startA < endB) && (endA > startB);
 }
 
-function calculateAbsenceDays(staffEmail, startDateTime, endDateTime) {
+function calculateAbsenceDays(staffEmail, startDateTime, endDateTime, config) {
   if (!staffEmail || !(startDateTime instanceof Date) || isNaN(startDateTime) || !(endDateTime instanceof Date) || isNaN(endDateTime)) throw new Error('Invalid params for calculateAbsenceDays.');
   if (endDateTime <= startDateTime) return 0;
-  const staffInfo = getStaffDirectoryInfoByEmail(staffEmail);
+  const staffInfo = getStaffDirectoryInfoByEmail(staffEmail, config);
   if (!staffInfo || !staffInfo.days) throw new Error(`Staff '${staffEmail}' not found or schedule missing for calculateAbsenceDays.`);
   let totalDaysMissed = 0;
   let currentDateIter = new Date(startDateTime.getFullYear(), startDateTime.getMonth(), startDateTime.getDate());
@@ -1667,13 +1769,13 @@ function calculateAbsenceDays(staffEmail, startDateTime, endDateTime) {
  * @returns {number} The total number of missed work hours, rounded to 4 decimal places.
  * @throws {Error} If staff member is not found or their schedule is missing.
  */
-function calculateAbsenceHoursFromSchedule(staffEmail, startDateTime, endDateTime) {
+function calculateAbsenceHoursFromSchedule(staffEmail, startDateTime, endDateTime, config) {
   if (!staffEmail || !(startDateTime instanceof Date) || isNaN(startDateTime) || !(endDateTime instanceof Date) || isNaN(endDateTime)) {
     throw new Error('Invalid params for calculateAbsenceHoursFromSchedule.');
   }
   if (endDateTime <= startDateTime) return 0;
 
-  const staffInfo = getStaffDirectoryInfoByEmail(staffEmail);
+  const staffInfo = getStaffDirectoryInfoByEmail(staffEmail, config);
   if (!staffInfo || !staffInfo.days) {
     throw new Error(`Staff '${staffEmail}' not found or schedule missing for calculateAbsenceHoursFromSchedule.`);
   }
@@ -1726,7 +1828,7 @@ function parseDayTimeString(date, timeString) {
   return { schedStart, schedEnd };
 }
 
-function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentRequestStartDate) {
+function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentRequestStartDate, config) {
   let totalDays = 0; const catTotals = {};
   let summary = `No approved absences found starting in 12 months prior to ${Utilities.formatDate(currentRequestStartDate, Session.getScriptTimeZone(), "dd/MM/yyyy")} within '${sheetName}'.\n`;
   if (!sheetName || !staffEmail || !(currentRequestStartDate instanceof Date) || isNaN(currentRequestStartDate)) return "Error: Invalid input for history.";
@@ -1736,7 +1838,7 @@ function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentReques
     let filterList = [];
     try {
       // Fetch and normalize the filter list to lowercase for case-insensitive matching.
-      const rawFilterValues = _getValuesFromNamedRange("FilterList");
+      const rawFilterValues = _getValuesFromNamedRange("FilterList", config.spreadsheetID);
       if (rawFilterValues) {
         filterList = rawFilterValues.map(item => item.toLowerCase());
       }
@@ -1749,7 +1851,7 @@ function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentReques
       Logger.log("Info: 'FilterList' named range not found or is empty. No absence types will be filtered from history summary.");
     }
 
-    histSheet = SpreadsheetApp.openById(SPREADSHEET_ID).getSheetByName(sheetName);
+    histSheet = SpreadsheetApp.openById(config.spreadsheetID).getSheetByName(sheetName);
     if (!histSheet || histSheet.getLastRow() < 2) return summary;
     const histIndices = getColumnIndices(histSheet, `hist_${sheetName}`);
     const reqHistHeaders = [HEADER_HIST_STAFF_EMAIL, HEADER_HIST_START_DATE, HEADER_HIST_DURATION_DAYS, HEADER_HIST_ABSENCE_TYPE];
@@ -1789,7 +1891,7 @@ function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentReques
         summary += ` - ${cat}: ${catTotals[cat].toFixed(2).replace(/\.00$/, '')} day(s)\n`;
       });
     }
-  } catch (e) { summary = `Error processing history from '${sheetName}': ${e.message}`; notifyAdmin(`Absence: Error calculating history from ${sheetName}: ${e.message}`); }
+  } catch (e) { summary = `Error processing history from '${sheetName}': ${e.message}`; notifyAdmin(`Absence: Error calculating history from ${sheetName}: ${e.message}`, config); }
   return summary.trim();
 }
 
@@ -1797,26 +1899,30 @@ function calculateAbsenceHistoryCategorized(sheetName, staffEmail, currentReques
 // NOTIFICATION & EXTERNAL SERVICE HELPERS
 // =========================================================================
 
-function notifyAdmin(message, subjectPrefix = "Absence System Notification") {
+function notifyAdmin(message, subjectPrefix = "Absence System Notification", config) {
   try {
-    if (ADMIN_EMAIL_FOR_ERRORS && isValidEmail(ADMIN_EMAIL_FOR_ERRORS)) {
+    const adminEmail = ADMIN_EMAIL_FOR_ERRORS;
+    if (adminEmail && isValidEmail(adminEmail)) {
       const mailOptions = {
-        to: ADMIN_EMAIL_FOR_ERRORS,
+        to: adminEmail,
         subject: `${subjectPrefix}: ${message.substring(0, 80)}`,
         body: message
       };
-      _sendConfiguredEmail(mailOptions);
+      _sendConfiguredEmail(mailOptions, false, config);
       
-    } else if (ADMIN_EMAIL_FOR_ERRORS) Logger.log(`Admin notify FAIL: invalid email '${ADMIN_EMAIL_FOR_ERRORS}'. Msg: ${message}`);
-    else Logger.log(`Admin notify SKIP: no email configured. Msg: ${message}`);
-  } catch (e) { Logger.log(`CRITICAL: Admin notify send FAIL: ${e}. Original msg: ${message}`); }
+    } else {
+      Logger.log(`Admin notify FAIL: ADMIN_EMAIL_FOR_ERRORS is not set or is an invalid email. Msg: ${message}`);
+    }
+  } catch (e) {
+    Logger.log(`CRITICAL: Admin notify send FAIL: ${e}. Original msg: ${message}`);
+  }
 }
 
-function createCalendarEvent(staffName, startTime, endTime, absenceType, approverEmail, approverComment = "") {
+function createCalendarEvent(staffName, startTime, endTime, absenceType, approverEmail, approverComment = "", config) {
   try {
     if (!(startTime instanceof Date && !isNaN(startTime)) || !(endTime instanceof Date && !isNaN(endTime))) {
       Logger.log(`Calendar Error for "${staffName}": Invalid dates. Start: ${startTime}, End: ${endTime}`);
-      notifyAdmin(`Absence Calendar Error: Invalid dates for ${staffName}.`); return;
+      notifyAdmin(`Absence Calendar Error: Invalid dates for ${staffName}.`, config); return;
     }
     if (endTime <= startTime) { Logger.log(`Calendar WARN for "${staffName}": End <= Start. Event not created.`); return; }
 
@@ -1825,11 +1931,11 @@ function createCalendarEvent(staffName, startTime, endTime, absenceType, approve
     if (approverComment && String(approverComment).trim()) desc += `\nComment: ${String(approverComment).trim()}`;
 
     let cal; const effUser = Session.getEffectiveUser().getEmail();
-    if (TARGET_CALENDAR_ID && String(TARGET_CALENDAR_ID).trim()) {
-      cal = CalendarApp.getCalendarById(String(TARGET_CALENDAR_ID).trim());
-      if (!cal) { Logger.log(`Calendar Error: Cannot get cal ID "${TARGET_CALENDAR_ID}". User: ${effUser}. Fallback to default.`); cal = CalendarApp.getDefaultCalendar(); }
+    if (config.targetCalendarID && String(config.targetCalendarID).trim()) {
+      cal = CalendarApp.getCalendarById(String(config.targetCalendarID).trim());
+      if (!cal) { Logger.log(`Calendar Error: Cannot get cal ID "${config.targetCalendarID}". User: ${effUser}. Fallback to default.`); cal = CalendarApp.getDefaultCalendar(); }
     } else { cal = CalendarApp.getDefaultCalendar(); Logger.log(`Using default calendar for ${effUser}.`); }
-    if (!cal) { Logger.log(`Calendar Error: No calendar found for ${effUser}.`); notifyAdmin(`Absence Calendar Error: No calendar for ${effUser} to log ${staffName}.`); return; }
+    if (!cal) { Logger.log(`Calendar Error: No calendar found for ${effUser}.`); notifyAdmin(`Absence Calendar Error: No calendar for ${effUser} to log ${staffName}.`, config); return; }
 
     // An event is "all-day" if it starts and ends at midnight on different days.
     const isAllDay = startTime.getHours() === 0 && startTime.getMinutes() === 0 && startTime.getSeconds() === 0 &&
@@ -1845,7 +1951,7 @@ function createCalendarEvent(staffName, startTime, endTime, absenceType, approve
       event = cal.createEvent(title, startTime, endTime, { description: desc });
       Logger.log(`Created event for ${staffName} from ${startTime.toLocaleString()} to ${endTime.toLocaleString()}. ID: ${event.getId()}`);
     }
-  } catch (e) { Logger.log(`Calendar Create Error for ${staffName}: ${e}\n${e.stack}`); notifyAdmin(`Absence Calendar Error for ${staffName}: ${e.message}`); }
+  } catch (e) { Logger.log(`Calendar Create Error for ${staffName}: ${e}\n${e.stack}`); notifyAdmin(`Absence Calendar Error for ${staffName}: ${e.message}`, config); }
 }
 
 function extractFileIdFromDriveUrl(urlOrId) {
@@ -1875,7 +1981,7 @@ function extractFileIdFromDriveUrl(urlOrId) {
  * Sends an email using GmailApp and configured sender details if available.
  * @param {object} mailOptions A standard options object containing to, subject, body, htmlBody, etc.
  */
-function _sendConfiguredEmail(mailOptions, returnMessageId = false) {
+function _sendConfiguredEmail(mailOptions, returnMessageId = false, config) {
   try {
     // Prepare the options for GmailApp.sendEmail
     const options = {};
@@ -1886,9 +1992,9 @@ function _sendConfiguredEmail(mailOptions, returnMessageId = false) {
     }
 
     // If a SENDER_EMAIL is configured and valid, add it as the 'from' and 'name'
-    if (SENDER_EMAIL && isValidEmail(SENDER_EMAIL)) {
-      options.from = SENDER_EMAIL;
-      options.name = SENDER_NAME || SENDER_EMAIL;
+    if (config && config.senderEmail && isValidEmail(config.senderEmail)) {
+      options.from = config.senderEmail;
+      options.name = config.senderName || config.senderEmail;
     }
 
     // Add htmlBody if it exists
@@ -1945,68 +2051,27 @@ function _sendConfiguredEmail(mailOptions, returnMessageId = false) {
 // =========================================================================
 
 /**
- * Updates the staff email dropdown on the Admin Form with a current list of active staff.
- * This function should be run on a daily time-driven trigger.
- */
-function updateAdminFormStaffList() {
-  try {
-    if (!ADMIN_FORM_ID) {
-      throw new Error("ADMIN_FORM_ID is not configured in the script.");
-    }
-
-    const activeEmails = _getActiveStaffEmailsFromDirectory();
-    if (!activeEmails || activeEmails.length === 0) {
-      Logger.log("No active staff emails found in the directory. The form will not be updated.");
-      notifyAdmin("Absence System Warning: Could not find any active staff in the directory to update the Admin Form dropdown.");
-      return;
-    }
-
-    const form = FormApp.openById(ADMIN_FORM_ID);
-    const questionTitle = HEADER_ADMIN_FORM_EMAIL; // Uses the existing constant
-    const questionItem = _findQuestionByTitle(form, questionTitle);
-
-    if (!questionItem) {
-      throw new Error(`Could not find a question with the exact title "${questionTitle}" in the Admin Form.`);
-    }
-
-    // Ensure the question is a dropdown (List) or multiple choice type
-    const itemType = questionItem.getType();
-    if (itemType !== FormApp.ItemType.LIST && itemType !== FormApp.ItemType.MULTIPLE_CHOICE) {
-      throw new Error(`The question "${questionTitle}" is not a Dropdown or Multiple Choice. Its type is ${itemType}.`);
-    }
-
-    // Update the choices in the dropdown list
-    questionItem.asListItem().setChoiceValues(activeEmails);
-
-    Logger.log(`Successfully updated the Admin Form dropdown with ${activeEmails.length} staff emails.`);
-
-  } catch (error) {
-    Logger.log(`ERROR in updateAdminFormStaffList: ${error.message}\nStack: ${error.stack}`);
-    notifyAdmin(`Absence Script CRITICAL Failure: Failed to update Admin Form dropdown. Error: ${error.message}`);
-  }
-}
-
-/**
- * Fetches a sorted list of email addresses for all "Active" staff from the directory.
+ * Fetches a sorted list of email addresses for all "Active" staff from the directory for a given site.
+ * @param {object} config The configuration object for the site.
  * @returns {string[]|null} An array of email strings, or null if an error occurs.
  * @private
  */
-function _getActiveStaffEmailsFromDirectory() {
-  if (!USE_DIRECTORY_LOOKUP || !STAFF_DIRECTORY_SHEET_ID) return null;
+function _getActiveStaffEmailsFromDirectory(config) {
+  if (!config.useDirectoryLookup || !config.staffDirectorySheetID) return null;
 
   let dirSheet;
   try {
-    dirSheet = STAFF_DIRECTORY_SHEET_NAME ? SpreadsheetApp.openById(STAFF_DIRECTORY_SHEET_ID).getSheetByName(STAFF_DIRECTORY_SHEET_NAME) : SpreadsheetApp.openById(STAFF_DIRECTORY_SHEET_ID).getSheets()[0];
+    dirSheet = STAFF_DIRECTORY_SHEET_NAME ? SpreadsheetApp.openById(config.staffDirectorySheetID).getSheetByName(STAFF_DIRECTORY_SHEET_NAME) : SpreadsheetApp.openById(config.staffDirectorySheetID).getSheets()[0];
     if (!dirSheet) {
-      Logger.log(`Directory sheet "${STAFF_DIRECTORY_SHEET_NAME || 'First'}" not found.`);
+      Logger.log(`Directory sheet "${STAFF_DIRECTORY_SHEET_NAME || 'First'}" not found for site ${config.siteID}.`);
       return null;
     }
   } catch (e) {
-    Logger.log(`Error accessing Directory Sheet: ${e}`);
+    Logger.log(`Error accessing Directory Sheet for site ${config.siteID}: ${e}`);
     return null;
   }
 
-  const dirIndices = getColumnIndices(dirSheet, `dir_${STAFF_DIRECTORY_SHEET_ID}_${STAFF_DIRECTORY_SHEET_NAME || 'FirstSheet'}`);
+  const dirIndices = getColumnIndices(dirSheet, `dir_${config.staffDirectorySheetID}_${STAFF_DIRECTORY_SHEET_NAME || 'FirstSheet'}`);
   const reqDirHeaders = [HEADER_DIR_STAFF_EMAIL, HEADER_DIR_STATUS];
   if (!validateRequiredHeaders(dirIndices, reqDirHeaders, dirSheet.getName())) return null;
 
@@ -2053,11 +2118,11 @@ function _findQuestionByTitle(form, title) {
  * @throws {Error} If the named range is not found.
  * @private
  */
-function _getValuesFromNamedRange(rangeName) {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+function _getValuesFromNamedRange(rangeName, spreadsheetId) {
+  const ss = SpreadsheetApp.openById(spreadsheetId);
   const range = ss.getRangeByName(rangeName);
   if (!range) {
-    throw new Error(`Named range "${rangeName}" not found.`);
+    throw new Error(`Named range "${rangeName}" not found in spreadsheet ID ${spreadsheetId}.`);
   }
   return range.getValues()
               .flat() // Flatten the 2D array to a 1D array
@@ -2066,37 +2131,156 @@ function _getValuesFromNamedRange(rangeName) {
 }
 
 /**
- * Updates the "Absence Type" dropdown on both the Admin and Staff forms
- * with values from the "AbsenceTypes" named range in the spreadsheet.
- * This should be run on a trigger (e.g., daily) or manually after updating the named range.
+ * Updates the "Absence Type" dropdown on both the Admin and Staff forms for ALL SITES
+ * with values from the "AbsenceTypes" named range in each site's spreadsheet.
+ * 
+ * WARNING: This function updates forms for ALL sites in the MAT. Use with caution.
+ * For single-site updates, use updateAbsenceTypeDropdownsForCurrentSite() instead.
+ * 
+ * This should be run on a trigger (e.g., daily) or manually by system administrators
+ * after updating named ranges across multiple sites.
  */
 function updateAbsenceTypeDropdowns() {
-  try {
-    Logger.log("Starting update of Absence Type dropdowns.");
+  const allConfigs = getAllConfigs();
+  if (!allConfigs) {
+    Logger.log("Could not retrieve any site configurations. Aborting updateAbsenceTypeDropdowns.");
+    return;
+  }
 
-    // 1. Get the list of absence types from the named range
-    const absenceTypes = _getValuesFromNamedRange("AbsenceTypes");
+  for (const config of allConfigs) {
+    try {
+      Logger.log(`Starting update of Absence Type dropdowns for site: ${config.siteID}.`);
+
+      // 1. Get the list of absence types from the named range for the current site's spreadsheet
+      const absenceTypes = _getValuesFromNamedRange("AbsenceTypes", config.spreadsheetID);
+      if (!absenceTypes || absenceTypes.length === 0) {
+        Logger.log(`No values found in the 'AbsenceTypes' named range for site ${config.siteID}. Forms will not be updated.`);
+        notifyAdmin(`Absence System Warning: Could not find any values in the 'AbsenceTypes' named range to update the forms for site ${config.siteID}.`, config);
+        continue;
+      }
+      Logger.log(`Found ${absenceTypes.length} absence types to update for site ${config.siteID}.`);
+
+      // 2. Define form details
+      const questionTitle = HEADER_LOG_ABSENCE_TYPE; // "Absence Type"
+      const formsToUpdate = [
+        { id: config.adminFormID, name: "Admin Form" },
+        { id: config.staffFormID, name: "Staff Form" }
+      ];
+
+      let successCount = 0;
+      let errorMessages = [];
+
+      // 3. Iterate and update each form for the current site
+      for (const formDetail of formsToUpdate) {
+        if (!formDetail.id) {
+          Logger.log(`Skipping ${formDetail.name} for site ${config.siteID} because its ID is not configured.`);
+          continue;
+        }
+        try {
+          const form = FormApp.openById(formDetail.id);
+          const questionItem = _findQuestionByTitle(form, questionTitle);
+
+          if (!questionItem) {
+            throw new Error(`Could not find question "${questionTitle}" in the ${formDetail.name}.`);
+          }
+
+          const itemType = questionItem.getType();
+          if (itemType !== FormApp.ItemType.LIST && itemType !== FormApp.ItemType.MULTIPLE_CHOICE && itemType !== FormApp.ItemType.CHECKBOX) {
+            throw new Error(`Question "${questionTitle}" in ${formDetail.name} is not a compatible type (Dropdown, Multiple Choice, Checkbox). Type is ${itemType}.`);
+          }
+
+          // Use a type-safe way to set choices
+          switch (itemType) {
+            case FormApp.ItemType.LIST:
+              questionItem.asListItem().setChoiceValues(absenceTypes);
+              break;
+            case FormApp.ItemType.MULTIPLE_CHOICE:
+              questionItem.asMultipleChoiceItem().setChoiceValues(absenceTypes);
+              break;
+            case FormApp.ItemType.CHECKBOX:
+              questionItem.asCheckboxItem().setChoiceValues(absenceTypes);
+              break;
+          }
+
+          Logger.log(`Successfully updated "${questionTitle}" dropdown in ${formDetail.name} for site ${config.siteID}.`);
+          successCount++;
+        } catch (formError) {
+          const errorMessage = `Failed to update ${formDetail.name} (ID: ${formDetail.id}) for site ${config.siteID}: ${formError.message}`;
+          Logger.log(errorMessage);
+          errorMessages.push(errorMessage);
+        }
+      }
+      
+      // 4. Final logging and notification for this site
+      if (errorMessages.length > 0) {
+        notifyAdmin(`Absence Script: Errors occurred during dropdown update for site ${config.siteID}.\n\n${errorMessages.join('\n')}`, config);
+      }
+      
+    } catch (error) {
+        const siteIdForError = config ? config.siteID : 'UNKNOWN SITE';
+        Logger.log(`FATAL ERROR in updateAbsenceTypeDropdowns for site ${siteIdForError}: ${error.message}\nStack: ${error.stack}`);
+        notifyAdmin(`Absence Script CRITICAL Failure: Failed to update Absence Type dropdowns for site ${siteIdForError}. Error: ${error.message}`, config);
+    }
+  }
+  Logger.log(`Absence Type update complete for all sites.`);
+}
+
+/**
+ * Updates the "Absence Type" dropdown for the current site's forms only.
+ * This function reads from the "AbsenceTypes" named range in the current spreadsheet
+ * and updates both the Admin and Staff forms for this site.
+ * Should be run from the school's own spreadsheet context.
+ */
+function updateAbsenceTypeDropdownsForCurrentSite() {
+  // Get config for the current spreadsheet
+  const config = getConfig(SpreadsheetApp.getActiveSpreadsheet().getId(), 'SpreadsheetID');
+  if (!config) {
+    // Try to show UI alert, but handle trigger context gracefully
+    try {
+      const ui = SpreadsheetApp.getUi();
+      ui.alert('Configuration Error', 'Could not find a valid configuration for this spreadsheet in the MAT Configuration Sheet.', ui.ButtonSet.OK);
+    } catch (uiError) {
+      Logger.log("Could not show UI alert (likely running on trigger). Configuration Error: Could not find a valid configuration for this spreadsheet in the MAT Configuration Sheet.");
+    }
+    Logger.log("Could not retrieve configuration for current site. Aborting updateAbsenceTypeDropdownsForCurrentSite.");
+    return;
+  }
+
+  try {
+    Logger.log(`Starting update of Absence Type dropdowns for current site: ${config.siteID}.`);
+
+    // 1. Get the list of absence types from the named range for the current site's spreadsheet
+    const absenceTypes = _getValuesFromNamedRange("AbsenceTypes", config.spreadsheetID);
     if (!absenceTypes || absenceTypes.length === 0) {
-      Logger.log("No values found in the 'AbsenceTypes' named range. Forms will not be updated.");
-      notifyAdmin("Absence System Warning: Could not find any values in the 'AbsenceTypes' named range to update the forms.");
+      // Try to show UI alert, but handle trigger context gracefully
+      try {
+        const ui = SpreadsheetApp.getUi();
+        const message = `No values found in the 'AbsenceTypes' named range. Please ensure the named range exists and contains absence type values.`;
+        ui.alert('No Absence Types Found', message, ui.ButtonSet.OK);
+      } catch (uiError) {
+        Logger.log("Could not show UI alert (likely running on trigger). No Absence Types Found: No values found in the 'AbsenceTypes' named range.");
+      }
+      Logger.log(`No values found in the 'AbsenceTypes' named range for site ${config.siteID}. Forms will not be updated.`);
+      notifyAdmin(`Absence System Warning: Could not find any values in the 'AbsenceTypes' named range to update the forms for site ${config.siteID}.`, config);
       return;
     }
-    Logger.log(`Found ${absenceTypes.length} absence types to update.`);
+    Logger.log(`Found ${absenceTypes.length} absence types to update for site ${config.siteID}.`);
 
     // 2. Define form details
     const questionTitle = HEADER_LOG_ABSENCE_TYPE; // "Absence Type"
     const formsToUpdate = [
-      { id: ADMIN_FORM_ID, name: "Admin Form" },
-      { id: STAFF_FORM_ID, name: "Staff Form" }
+      { id: config.adminFormID, name: "Admin Form" },
+      { id: config.staffFormID, name: "Staff Form" }
     ];
 
     let successCount = 0;
     let errorMessages = [];
 
-    // 3. Iterate and update each form
+    // 3. Iterate and update each form for the current site
     for (const formDetail of formsToUpdate) {
       if (!formDetail.id) {
-        Logger.log(`Skipping ${formDetail.name} because its ID is not configured.`);
+        Logger.log(`Skipping ${formDetail.name} for site ${config.siteID} because its ID is not configured.`);
+        errorMessages.push(`${formDetail.name} ID is not configured in the MAT Configuration Sheet.`);
         continue;
       }
       try {
@@ -2125,7 +2309,7 @@ function updateAbsenceTypeDropdowns() {
             break;
         }
 
-        Logger.log(`Successfully updated "${questionTitle}" dropdown in ${formDetail.name}.`);
+        Logger.log(`Successfully updated "${questionTitle}" dropdown in ${formDetail.name} for site ${config.siteID}.`);
         successCount++;
       } catch (formError) {
         const errorMessage = `Failed to update ${formDetail.name} (ID: ${formDetail.id}): ${formError.message}`;
@@ -2134,16 +2318,192 @@ function updateAbsenceTypeDropdowns() {
       }
     }
     
-    // 4. Final logging and notification
-    if (errorMessages.length > 0) {
-      notifyAdmin(`Absence Script: Errors occurred during dropdown update.\n\n${errorMessages.join('\n')}`);
+    // 4. Show results to user (with trigger context handling)
+    try {
+      const ui = SpreadsheetApp.getUi();
+      if (successCount > 0 && errorMessages.length === 0) {
+        ui.alert('Update Complete', `Successfully updated ${successCount} form(s) with ${absenceTypes.length} absence types.`, ui.ButtonSet.OK);
+      } else if (successCount > 0 && errorMessages.length > 0) {
+        const message = `Partially successful: Updated ${successCount} form(s), but encountered ${errorMessages.length} error(s).\n\nErrors:\n${errorMessages.join('\n')}`;
+        ui.alert('Update Partially Complete', message, ui.ButtonSet.OK);
+        notifyAdmin(`Absence Script: Partial success during dropdown update for site ${config.siteID}.\n\n${errorMessages.join('\n')}`, config);
+      } else {
+        const message = `Update failed. Errors:\n${errorMessages.join('\n')}`;
+        ui.alert('Update Failed', message, ui.ButtonSet.OK);
+        notifyAdmin(`Absence Script: Failed to update Absence Type dropdowns for site ${config.siteID}.\n\n${errorMessages.join('\n')}`, config);
+      }
+    } catch (uiError) {
+      // Handle trigger context - just log the results
+      if (successCount > 0 && errorMessages.length === 0) {
+        Logger.log(`Trigger execution: Successfully updated ${successCount} form(s) with ${absenceTypes.length} absence types for site ${config.siteID}.`);
+      } else if (successCount > 0 && errorMessages.length > 0) {
+        Logger.log(`Trigger execution: Partially successful for site ${config.siteID}. Updated ${successCount} form(s), but encountered ${errorMessages.length} error(s).`);
+        notifyAdmin(`Absence Script: Partial success during dropdown update for site ${config.siteID}.\n\n${errorMessages.join('\n')}`, config);
+      } else {
+        Logger.log(`Trigger execution: Update failed for site ${config.siteID}. Errors:\n${errorMessages.join('\n')}`);
+        notifyAdmin(`Absence Script: Failed to update Absence Type dropdowns for site ${config.siteID}.\n\n${errorMessages.join('\n')}`, config);
+      }
     }
     
-    Logger.log(`Absence Type update complete. Successfully updated ${successCount} of ${formsToUpdate.length} forms.`);
+  } catch (error) {
+    Logger.log(`FATAL ERROR in updateAbsenceTypeDropdownsForCurrentSite for site ${config.siteID}: ${error.message}\nStack: ${error.stack}`);
+    notifyAdmin(`Absence Script CRITICAL Failure: Failed to update Absence Type dropdowns for site ${config.siteID}. Error: ${error.message}`, config);
+    
+    // Try to show error to user, but handle trigger context gracefully
+    try {
+      const ui = SpreadsheetApp.getUi();
+      ui.alert('Critical Error', `A critical error occurred: ${error.message}\n\nPlease check the script logs and contact the administrator.`, ui.ButtonSet.OK);
+    } catch (uiError) {
+      Logger.log(`Trigger execution: Critical error for site ${config.siteID}: ${error.message}`);
+    }
+  }
+}
+
+/**
+ * Updates the staff email dropdown on the Admin Form for ALL SITES.
+ * This function should be run on a daily time-driven trigger.
+ * 
+ * WARNING: This function updates forms for ALL sites in the MAT. Use with caution.
+ * For single-site updates, use updateAdminFormStaffListForCurrentSite() instead.
+ * 
+ * This should be run on a trigger (e.g., daily) or manually by system administrators.
+ */
+function updateAdminFormStaffList() {
+  const allConfigs = getAllConfigs();
+  if (!allConfigs) {
+    Logger.log("Could not retrieve any site configurations. Aborting updateAdminFormStaffList.");
+    return;
+  }
+
+  for (const config of allConfigs) {
+    try {
+      if (!config.adminFormID) {
+        Logger.log(`Skipping site ${config.siteID}: adminFormID is not configured.`);
+        continue;
+      }
+
+      const activeEmails = _getActiveStaffEmailsFromDirectory(config);
+      if (!activeEmails || activeEmails.length === 0) {
+        Logger.log(`No active staff emails found in the directory for site ${config.siteID}. The form will not be updated.`);
+        notifyAdmin(`Absence System Warning: Could not find any active staff in the directory to update the Admin Form dropdown for site ${config.siteID}.`, config);
+        continue;
+      }
+
+      const form = FormApp.openById(config.adminFormID);
+      const questionTitle = HEADER_ADMIN_FORM_EMAIL; // Uses the existing constant
+      const questionItem = _findQuestionByTitle(form, questionTitle);
+
+      if (!questionItem) {
+        throw new Error(`Could not find a question with the exact title "${questionTitle}" in the Admin Form for site ${config.siteID}.`);
+      }
+
+      // Ensure the question is a dropdown (List) or multiple choice type
+      const itemType = questionItem.getType();
+      if (itemType !== FormApp.ItemType.LIST && itemType !== FormApp.ItemType.MULTIPLE_CHOICE) {
+        throw new Error(`The question "${questionTitle}" is not a Dropdown or Multiple Choice for site ${config.siteID}. Its type is ${itemType}.`);
+      }
+
+      // Update the choices in the dropdown list
+      questionItem.asListItem().setChoiceValues(activeEmails);
+
+      Logger.log(`Successfully updated the Admin Form dropdown for site ${config.siteID} with ${activeEmails.length} staff emails.`);
+
+    } catch (error) {
+      Logger.log(`ERROR in updateAdminFormStaffList for site ${config.siteID}: ${error.message}\nStack: ${error.stack}`);
+      notifyAdmin(`Absence Script CRITICAL Failure: Failed to update Admin Form dropdown for site ${config.siteID}. Error: ${error.message}`, config);
+    }
+  }
+}
+
+/**
+ * Updates the staff email dropdown on the Admin Form for the current site only.
+ * This function should be run from the school's own spreadsheet context.
+ * It reads from the Staff Directory to get active staff emails.
+ */
+function updateAdminFormStaffListForCurrentSite() {
+  // Get config for the current spreadsheet
+  const config = getConfig(SpreadsheetApp.getActiveSpreadsheet().getId(), 'SpreadsheetID');
+  if (!config) {
+    // Try to show UI alert, but handle trigger context gracefully
+    try {
+      const ui = SpreadsheetApp.getUi();
+      ui.alert('Configuration Error', 'Could not find a valid configuration for this spreadsheet in the MAT Configuration Sheet.', ui.ButtonSet.OK);
+    } catch (uiError) {
+      Logger.log("Could not show UI alert (likely running on trigger). Configuration Error: Could not find a valid configuration for this spreadsheet in the MAT Configuration Sheet.");
+    }
+    Logger.log("Could not retrieve configuration for current site. Aborting updateAdminFormStaffListForCurrentSite.");
+    return;
+  }
+
+  try {
+    Logger.log(`Starting update of Admin Form staff list for current site: ${config.siteID}.`);
+
+    if (!config.adminFormID) {
+      // Try to show UI alert, but handle trigger context gracefully
+      try {
+        const ui = SpreadsheetApp.getUi();
+        ui.alert('Configuration Error', 'Admin Form ID is not configured for this site in the MAT Configuration Sheet.', ui.ButtonSet.OK);
+      } catch (uiError) {
+        Logger.log("Could not show UI alert (likely running on trigger). Configuration Error: Admin Form ID is not configured for this site in the MAT Configuration Sheet.");
+      }
+      Logger.log(`Skipping site ${config.siteID}: adminFormID is not configured.`);
+      return;
+    }
+
+    const activeEmails = _getActiveStaffEmailsFromDirectory(config);
+    if (!activeEmails || activeEmails.length === 0) {
+      // Try to show UI alert, but handle trigger context gracefully
+      try {
+        const ui = SpreadsheetApp.getUi();
+        const message = `No active staff emails found in the directory. Please ensure:\n1. The Staff Directory is properly configured\n2. There are staff members with "Active" status\n3. Staff emails are valid`;
+        ui.alert('No Active Staff Found', message, ui.ButtonSet.OK);
+      } catch (uiError) {
+        Logger.log("Could not show UI alert (likely running on trigger). No Active Staff Found: No active staff emails found in the directory.");
+      }
+      Logger.log(`No active staff emails found in the directory for site ${config.siteID}. The form will not be updated.`);
+      notifyAdmin(`Absence System Warning: Could not find any active staff in the directory to update the Admin Form dropdown for site ${config.siteID}.`, config);
+      return;
+    }
+
+    const form = FormApp.openById(config.adminFormID);
+    const questionTitle = HEADER_ADMIN_FORM_EMAIL; // Uses the existing constant
+    const questionItem = _findQuestionByTitle(form, questionTitle);
+
+    if (!questionItem) {
+      throw new Error(`Could not find a question with the exact title "${questionTitle}" in the Admin Form.`);
+    }
+
+    // Ensure the question is a dropdown (List) or multiple choice type
+    const itemType = questionItem.getType();
+    if (itemType !== FormApp.ItemType.LIST && itemType !== FormApp.ItemType.MULTIPLE_CHOICE) {
+      throw new Error(`The question "${questionTitle}" is not a Dropdown or Multiple Choice. Its type is ${itemType}.`);
+    }
+
+    // Update the choices in the dropdown list
+    questionItem.asListItem().setChoiceValues(activeEmails);
+
+    Logger.log(`Successfully updated the Admin Form dropdown for site ${config.siteID} with ${activeEmails.length} staff emails.`);
+    
+    // Show success message to user (with trigger context handling)
+    try {
+      const ui = SpreadsheetApp.getUi();
+      ui.alert('Update Complete', `Successfully updated the Admin Form dropdown with ${activeEmails.length} active staff emails.`, ui.ButtonSet.OK);
+    } catch (uiError) {
+      // Handle trigger context - just log the success
+      Logger.log(`Trigger execution: Successfully updated the Admin Form dropdown with ${activeEmails.length} active staff emails for site ${config.siteID}.`);
+    }
 
   } catch (error) {
-    Logger.log(`FATAL ERROR in updateAbsenceTypeDropdowns: ${error.message}\nStack: ${error.stack}`);
-    notifyAdmin(`Absence Script CRITICAL Failure: Failed to update Absence Type dropdowns. Error: ${error.message}`);
+    Logger.log(`ERROR in updateAdminFormStaffListForCurrentSite for site ${config.siteID}: ${error.message}\nStack: ${error.stack}`);
+    notifyAdmin(`Absence Script CRITICAL Failure: Failed to update Admin Form dropdown for site ${config.siteID}. Error: ${error.message}`, config);
+    
+    // Try to show error to user, but handle trigger context gracefully
+    try {
+      const ui = SpreadsheetApp.getUi();
+      ui.alert('Update Failed', `An error occurred: ${error.message}\n\nPlease check the script logs and contact the administrator.`, ui.ButtonSet.OK);
+    } catch (uiError) {
+      Logger.log(`Trigger execution: Update failed for site ${config.siteID}. Error: ${error.message}`);
+    }
   }
 }
 
@@ -2158,9 +2518,16 @@ function updateAbsenceTypeDropdowns() {
  */
 function archiveOldRequests() {
   const ui = SpreadsheetApp.getUi();
+  // Since this is run from a sheet, we get the context from the active spreadsheet
+  const config = getConfig(SpreadsheetApp.getActiveSpreadsheet().getId(), 'SpreadsheetID');
+  if (!config) {
+    ui.alert('Configuration Error', 'Could not find a valid configuration for this spreadsheet. Please check the MAT Configuration Sheet.', ui.ButtonSet.OK);
+    return;
+  }
+
   const result = ui.alert(
-    'Confirm Archiving',
-    `This will move all completed requests older than ${ARCHIVE_OLDER_THAN_DAYS} days from "${REQUEST_LOG_SHEET_NAME}" to "${ARCHIVE_SHEET_NAME}".\n\nThis action cannot be undone. Are you sure you want to proceed?`,
+    `Confirm Archiving for ${config.siteName}`,
+    `This will move all completed requests older than ${config.archiveOlderThanDays} days from "${REQUEST_LOG_SHEET_NAME}" to "${ARCHIVE_SHEET_NAME}".\n\nThis action cannot be undone. Are you sure you want to proceed?`,
     ui.ButtonSet.YES_NO
   );
 
@@ -2170,12 +2537,12 @@ function archiveOldRequests() {
   }
 
   try {
-    const result = _performArchiving();
+    const result = _performArchiving(config);
     ui.alert('Archiving Complete', result.message, ui.ButtonSet.OK);
     Logger.log(result.message);
   } catch (error) {
-    Logger.log(`ERROR in archiveOldRequests: ${error.message}\nStack: ${error.stack}`);
-    notifyAdmin(`Absence Script CRITICAL Failure: Failed to archive old requests. Error: ${error.message}`);
+    Logger.log(`ERROR in archiveOldRequests for site ${config.siteID}: ${error.message}\nStack: ${error.stack}`);
+    notifyAdmin(`Absence Script CRITICAL Failure: Failed to archive old requests for site ${config.siteID}. Error: ${error.message}`, config);
     ui.alert('Archiving Failed', `An error occurred: ${error.message}. Please check the logs.`, ui.ButtonSet.OK);
   }
 }
@@ -2186,21 +2553,29 @@ function archiveOldRequests() {
  * It will archive requests automatically and send email notifications about the results.
  */
 function archiveOldRequestsAutomatically() {
-  try {
-    Logger.log(`Starting automatic archiving of requests older than ${ARCHIVE_OLDER_THAN_DAYS} days...`);
-    const result = _performArchiving();
-    
-    // Log the result
-    Logger.log(result.message);
-    
-    // Optionally notify admin of successful archiving (only if requests were actually archived)
-    if (result.archivedCount > 0) {
-      notifyAdmin(`Automatic Archiving Complete: ${result.message}`, "Absence System - Automatic Archiving");
+  const allConfigs = getAllConfigs();
+  if (!allConfigs) {
+    Logger.log("Could not retrieve any site configurations. Aborting archiveOldRequestsAutomatically.");
+    return;
+  }
+
+  for (const config of allConfigs) {
+    try {
+      Logger.log(`Starting automatic archiving for site ${config.siteID} (requests older than ${config.archiveOlderThanDays} days)...`);
+      const result = _performArchiving(config);
+      
+      // Log the result
+      Logger.log(`Site ${config.siteID}: ${result.message}`);
+      
+      // Optionally notify admin of successful archiving (only if requests were actually archived)
+      if (result.archivedCount > 0) {
+        notifyAdmin(`Automatic Archiving Complete: ${result.message}`, `Absence System - ${config.siteID} Archiving`, config);
+      }
+      
+    } catch (error) {
+      Logger.log(`ERROR in archiveOldRequestsAutomatically for site ${config.siteID}: ${error.message}\nStack: ${error.stack}`);
+      notifyAdmin(`Absence Script CRITICAL Failure: Automatic archiving failed for site ${config.siteID}. Error: ${error.message}`, config);
     }
-    
-  } catch (error) {
-    Logger.log(`ERROR in archiveOldRequestsAutomatically: ${error.message}\nStack: ${error.stack}`);
-    notifyAdmin(`Absence Script CRITICAL Failure: Automatic archiving failed. Error: ${error.message}`);
   }
 }
 
@@ -2210,8 +2585,8 @@ function archiveOldRequestsAutomatically() {
  * @returns {object} Object containing success status, message, and archived count
  * @private
  */
-function _performArchiving() {
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+function _performArchiving(config) {
+  const ss = SpreadsheetApp.openById(config.spreadsheetID);
   const logSheet = ss.getSheetByName(REQUEST_LOG_SHEET_NAME);
   if (!logSheet) {
     throw new Error(`Log sheet "${REQUEST_LOG_SHEET_NAME}" not found.`);
@@ -2263,7 +2638,7 @@ function _performArchiving() {
   const allData = dataRange.getValues();
 
   const archiveThreshold = new Date();
-  archiveThreshold.setDate(archiveThreshold.getDate() - ARCHIVE_OLDER_THAN_DAYS);
+  archiveThreshold.setDate(archiveThreshold.getDate() - config.archiveOlderThanDays);
   archiveThreshold.setHours(0, 0, 0, 0);
 
   const rowsToArchive = [];
@@ -2328,6 +2703,38 @@ function _performArchiving() {
   }
 }
 
+/**
+ * Helper function to get all configurations from the MAT sheet.
+ * Used by time-driven triggers that need to iterate over all sites.
+ * @returns {object[]|null} An array of all configuration objects, or null on failure.
+ */
+function getAllConfigs() {
+    try {
+        const matSheet = SpreadsheetApp.openById(MAT_CONFIG_SHEET_ID).getSheets()[0];
+        const data = matSheet.getDataRange().getValues();
+        const headers = data.shift().map(h => h.trim());
+
+        const allConfigs = data.map(configRow => {
+            const config = {};
+            headers.forEach((header, index) => {
+                const camelCaseHeader = header.charAt(0).toLowerCase() + header.slice(1);
+                config[camelCaseHeader] = configRow[index];
+            });
+            // Coerce types for consistency
+            config.useDirectoryLookup = (String(config.useDirectoryLookup).toUpperCase() === 'TRUE');
+            config.archiveOlderThanDays = parseInt(config.archiveOlderThanDays, 10) || ARCHIVE_OLDER_THAN_DAYS_DEFAULT;
+            return config;
+        }).filter(c => c.siteID); // Filter out any empty rows
+
+        Logger.log(`getAllConfigs: Found ${allConfigs.length} valid site configurations.`);
+        return allConfigs;
+    } catch (e) {
+        Logger.log(`FATAL ERROR in getAllConfigs: ${e.message}`);
+        // This is a critical failure, so we might want to notify a central admin
+        // For now, we return null to stop the calling process.
+        return null;
+    }
+}
 
 
 // =========================================================================
@@ -2342,47 +2749,34 @@ function _performArchiving() {
 function setupAllTriggers() {
   deleteAllTriggers(); // Start with a clean slate
   
-  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
-  
-  // Form Submission Trigger
-  ScriptApp.newTrigger('handleFormSubmissions')
-    .forSpreadsheet(ss)
-    .onFormSubmit()
-    .create();
-    
-  // Edit Trigger for Bromcom column
-  ScriptApp.newTrigger('onBromcomEntryEdit')
-    .forSpreadsheet(ss)
-    .onEdit()
-    .create();
+  // These triggers are for the script project itself, not for individual sheets.
+  // They will run for ALL sites that use this script.
     
   // Time-driven trigger for updating Admin Form staff list (daily at 1 AM)
-  ScriptApp.newTrigger('updateAdminFormStaffList')
+  ScriptApp.newTrigger('updateAdminFormStaffListForCurrentSite')
     .timeBased()
     .everyDays(1)
     .atHour(1)
     .create();
 
-  // Time-driven trigger for updating Absence Type dropdowns (daily at 1 AM)
-  ScriptApp.newTrigger('updateAbsenceTypeDropdowns')
+  // Time-driven trigger for updating Absence Type Dropdowns (daily at 1 AM)
+  ScriptApp.newTrigger('updateAbsenceTypeDropdownsForCurrentSite')
     .timeBased()
     .everyDays(1)
     .atHour(1)
-    .create();
-
-  // Time-driven trigger for automatic archiving (daily at 2 AM)
-  ScriptApp.newTrigger('archiveOldRequestsAutomatically')
-    .timeBased()
-    .everyDays(1)
-    .atHour(2)
     .create();
     
-  Logger.log('All triggers have been created successfully.');
-  
+  Logger.log('Time-based triggers have been created successfully.');
+  Logger.log('IMPORTANT: You must still manually set up the onFormSubmit and onEdit triggers for EACH school spreadsheet to point to this script project.');
+
   // If called from bound script context, show UI alert
   try {
     const ui = SpreadsheetApp.getUi();
-    ui.alert('Trigger Setup Complete', 'All triggers have been created successfully.', ui.ButtonSet.OK);
+    ui.alert(
+        'Trigger Setup Complete', 
+        'School-level time-based triggers have been created.\n\nIMPORTANT: You must now go to each individual school\'s spreadsheet and manually create the "on form-submit" and "on edit" triggers to point to this deployed script.',
+        ui.ButtonSet.OK
+    );
   } catch (e) {
     // If no UI context, just log
     Logger.log('Triggers created - no UI context available for alert');
@@ -2410,7 +2804,7 @@ function deleteAllTriggers() {
     if (deleted > 0) {
       ui.alert('Triggers Deleted', `Deleted ${deleted} trigger(s).`, ui.ButtonSet.OK);
     } else {
-      ui.alert('No Triggers Found', 'No triggers were found to delete.', ui.ButtonSet.OK);
+      ui.alert('No Triggers Found', 'No project-level triggers were found to delete.', ui.ButtonSet.OK);
     }
   } catch (e) {
     // If no UI context, just log
@@ -2423,9 +2817,9 @@ function deleteAllTriggers() {
 // =========================================================================
 
 /**
- * Flushes all known column index caches used by the script.
+ * Flushes all known column index and configuration caches used by the script.
  * This is essential to run after changing the column order on any of the
- * tracked sheets (Master Log, Raw Response sheets, Directory, or History).
+ * tracked sheets or updating the MAT Configuration Sheet.
  */
 function flushColumnIndexCache() {
     const ui = SpreadsheetApp.getUi();
@@ -2435,53 +2829,60 @@ function flushColumnIndexCache() {
         return;
     }
 
-    // --- Define all cache keys used in the script ---
-    const keysToFlush = [
-        // Master Log Sheet
-        `columnIndices_${REQUEST_LOG_SHEET_NAME}_v2`,
-        // Raw Response Sheets (NEWLY ADDED)
-        `columnIndices_${STAFF_RESPONSE_SHEET}_v2`,
-        `columnIndices_${ADMIN_RESPONSE_SHEET}_v2`,
-        // History Sheet
-        `hist_${HISTORY_SHEET_NAME}`,
-        // Legacy keys for good measure
-        `columnIndices_${REQUEST_LOG_SHEET_NAME}`
-    ];
+    const keysToFlush = new Set();
 
-    // Conditionally add the directory sheet key
-    if (USE_DIRECTORY_LOOKUP && STAFF_DIRECTORY_SHEET_ID) {
-        const dirSheetIdentifier = `dir_${STAFF_DIRECTORY_SHEET_ID}_${STAFF_DIRECTORY_SHEET_NAME || 'FirstSheet'}`;
-        keysToFlush.push(dirSheetIdentifier);
+    // 1. Add static cache keys based on global constants
+    // These are the same for all sites using this script.
+    keysToFlush.add(`columnIndices_${REQUEST_LOG_SHEET_NAME}_v2`);
+    keysToFlush.add(`columnIndices_${STAFF_RESPONSE_SHEET}_v2`);
+    keysToFlush.add(`columnIndices_${ADMIN_RESPONSE_SHEET}_v2`);
+    keysToFlush.add(`columnIndices_hist_${HISTORY_SHEET_NAME}_v2`);
+
+    // Add legacy key for good measure, just in case old entries exist
+    keysToFlush.add(`columnIndices_${REQUEST_LOG_SHEET_NAME}`);
+
+
+    // 2. Add dynamic cache keys based on each site's configuration
+    const allConfigs = getAllConfigs();
+    if (allConfigs) {
+        allConfigs.forEach(config => {
+            // Add config cache keys
+            if (config.spreadsheetID) keysToFlush.add(`config_SpreadsheetID_${config.spreadsheetID}`);
+            if (config.siteID) keysToFlush.add(`config_siteID_${config.siteID}`);
+            
+            // Add Staff Directory column index cache key (if used)
+            if (config.useDirectoryLookup && config.staffDirectorySheetID) {
+                const dirSheetIdentifier = `dir_${config.staffDirectorySheetID}_${STAFF_DIRECTORY_SHEET_NAME || 'FirstSheet'}`;
+                keysToFlush.add(`columnIndices_${dirSheetIdentifier}_v2`);
+            }
+        });
     }
 
-    // --- Attempt to remove each key ---
-    let removed = 0;
-    let failed = 0;
-    Logger.log(`Attempting to flush the following keys: ${keysToFlush.join(', ')}`);
+    const keysArray = Array.from(keysToFlush);
+    
+    if (keysArray.length === 0) {
+        ui.alert('Cache Flush', 'No cache keys to flush. This might happen if no site configurations are found.', ui.ButtonSet.OK);
+        Logger.log('No cache keys were identified to flush.');
+        return;
+    }
+    
+    Logger.log(`Attempting to flush ${keysArray.length} unique cache keys.`);
 
-    keysToFlush.forEach(key => {
-        try {
-            // Check if the key exists before trying to remove it
-            if (cache.get(key) !== null) {
-                cache.remove(key);
-                // Verify removal
-                if (cache.get(key) === null) {
-                    removed++;
-                    Logger.log(`Successfully removed key: ${key}`);
-                } else {
-                    failed++;
-                    Logger.log(`FAILED to confirm removal of key: ${key}`);
-                }
-            }
-        } catch (e) {
-            failed++;
-            Logger.log(`Error removing cache key ${key}: ${e}`);
-        }
-    });
+    // 3. Remove all collected keys at once
+    cache.removeAll(keysArray);
 
-    let msg = `Cache flush complete.\n\n${removed} key(s) successfully removed.`;
-    if (failed > 0) {
-        msg += `\n${failed} key(s) failed to confirm removal (check script logs for details).`;
+    // 4. Verify removal for clearer user feedback
+    Utilities.sleep(1000); // Give cache a moment to process removal
+    const verificationResults = cache.getAll(keysArray);
+    const failedKeys = keysArray.filter(key => verificationResults.hasOwnProperty(key));
+    const removedCount = keysArray.length - failedKeys.length;
+
+    Logger.log(`Successfully removed ${removedCount} key(s).`);
+
+    let msg = `Cache flush complete.\n\n${removedCount} key(s) successfully removed.`;
+    if (failedKeys.length > 0) {
+        msg += `\n${failedKeys.length} key(s) failed to confirm removal (check script logs for details).`;
+        Logger.log(`Failed to confirm removal for ${failedKeys.length} key(s): ${failedKeys.join(', ')}`);
     }
     ui.alert('Cache Flush Results', msg, ui.ButtonSet.OK);
     Logger.log(msg);
@@ -2502,10 +2903,6 @@ function onBromcomEntryEdit(e) {
   
   try {
     const editedRange = e.range;
-    const editedRow = editedRange.getRow();
-    
-    // Skip header row
-    if (editedRow === 1) return;
     
     // Get column indices for the sheet
     const logIndices = getColumnIndices(sheet, REQUEST_LOG_SHEET_NAME);
@@ -2528,29 +2925,40 @@ function onBromcomEntryEdit(e) {
       return;
     }
     
-    // Check if the edit was in the Bromcom Entry column
-    const editedColumn = editedRange.getColumn();
-    if (editedColumn !== bromcomCol) return;
-    
-    // Get the new value in the Bromcom Entry column
-    const newValue = editedRange.getValue();
-    
-    // Only add timestamp if there's actually content in the Bromcom Entry cell
-    if (newValue && String(newValue).trim() !== '') {
-      const now = new Date();
-      const timestampFormat = "yyyy-MM-dd HH:mm:ss";
-      
-      // Set the timestamp in the Entry Timestamp column
-      sheet.getRange(editedRow, timestampCol)
-        .setValue(now)
-        .setNumberFormat(timestampFormat);
-      
-      Logger.log(`Bromcom Entry timestamp updated for row ${editedRow}: ${Utilities.formatDate(now, Session.getScriptTimeZone(), timestampFormat)}`);
-    } else {
-      // If Bromcom Entry is cleared, also clear the timestamp
-      sheet.getRange(editedRow, timestampCol).clearContent();
-      Logger.log(`Bromcom Entry cleared for row ${editedRow}, timestamp removed`);
+    // Check if the edit occurred within the Bromcom Entry column
+    const firstEditedCol = editedRange.getColumn();
+    const lastEditedCol = editedRange.getLastColumn();
+    if (bromcomCol < firstEditedCol || bromcomCol > lastEditedCol) {
+      return;
     }
+    
+    const startRow = editedRange.getRow();
+    const numRows = editedRange.getNumRows();
+    const bromcomValues = sheet.getRange(startRow, bromcomCol, numRows, 1).getValues();
+    const timestampRanges = sheet.getRange(startRow, timestampCol, numRows, 1);
+    const timestampsToSet = [];
+    const now = new Date();
+    const timestampFormat = "yyyy-MM-dd HH:mm:ss";
+
+    for (let i = 0; i < numRows; i++) {
+        const currentRow = startRow + i;
+        if (currentRow === 1) {
+            timestampsToSet.push(['']); // Keep header blank
+            continue;
+        };
+
+        const newValue = bromcomValues[i][0];
+        if (newValue && String(newValue).trim() !== '') {
+            timestampsToSet.push([now]);
+            Logger.log(`Bromcom Entry timestamp will be updated for row ${currentRow}`);
+        } else {
+            timestampsToSet.push(['']); // Clear timestamp if Bromcom Entry is empty
+            Logger.log(`Bromcom Entry cleared for row ${currentRow}, timestamp will be removed`);
+        }
+    }
+    
+    // Batch update the timestamp column for better performance
+    timestampRanges.setValues(timestampsToSet).setNumberFormat(timestampFormat);
     
   } catch (error) {
     Logger.log(`Error in onBromcomEntryEdit: ${error.message}\nStack: ${error.stack}`);
@@ -2567,9 +2975,16 @@ function onBromcomEntryEdit(e) {
 function rerunProcessingOnRow() {
     const ui = SpreadsheetApp.getUi();
 
+    // Get config for the current sheet context
+    const config = getConfig(SpreadsheetApp.getActiveSpreadsheet().getId(), 'SpreadsheetID');
+    if (!config) {
+        ui.alert('Configuration Error', 'Could not find a valid configuration for this spreadsheet in the MAT Configuration Sheet.', ui.ButtonSet.OK);
+        return;
+    }
+
     // 1. Prompt for row number
     const promptResponse = ui.prompt(
-        'Rerun Processing',
+        `Rerun Processing for ${config.siteName}`,
         'Enter the row number to reprocess:',
         ui.ButtonSet.OK_CANCEL
     );
@@ -2584,7 +2999,7 @@ function rerunProcessingOnRow() {
     }
 
     // 2. Get sheet and validate row existence
-    const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    const ss = SpreadsheetApp.openById(config.spreadsheetID);
     const requestSheet = ss.getSheetByName(REQUEST_LOG_SHEET_NAME);
     if (!requestSheet) {
         ui.alert('Error', `Sheet "${REQUEST_LOG_SHEET_NAME}" not found.`, ui.ButtonSet.OK);
@@ -2635,7 +3050,7 @@ function rerunProcessingOnRow() {
         const columnsToClear = [
             HEADER_LOG_APPROVAL_STATUS, HEADER_LOG_LM_NOTIFIED, HEADER_LOG_HT_NOTIFIED,
             HEADER_LOG_APPROVAL_DATE, HEADER_LOG_APPROVER_EMAIL, HEADER_LOG_DURATION_HOURS,
-            HEADER_LOG_DURATION_DAYS, HEADER_LOG_APPROVER_COMMENT
+            HEADER_LOG_DURATION_DAYS, HEADER_LOG_APPROVER_COMMENT, HEADER_LOG_PAY_STATUS
         ];
 
         columnsToClear.forEach(header => {
@@ -2649,7 +3064,7 @@ function rerunProcessingOnRow() {
         // 7. Reconstruct processing options and call the core handler
         const webAppUrl = WEB_APP_URL;
         if (requiresApproval && !webAppUrl) {
-            throw new Error("Script must be deployed as a Web App for approval links to work. The rerun cannot proceed.");
+            throw new Error("Script must be deployed as a Web App and WEB_APP_URL constant must be set for approval links to work. The rerun cannot proceed.");
         }
 
         const startDateRaw = rowData[logIndices[HEADER_LOG_ABSENCE_START_DATE.toLowerCase()] - 1];
@@ -2664,11 +3079,13 @@ function rerunProcessingOnRow() {
             submissionSource: submissionSource,
             webAppUrl: webAppUrl,
             absenceDetailsOnDate: absenceDetailsOnDate,
-            adminSubmitterEmail: null // This info is not available on rerun, but not critical
+            adminSubmitterEmail: null, // This info is not available on rerun, but not critical
+            siteId: config.siteID,
+            useDirectoryLookup: config.useDirectoryLookup
         };
 
         // Call the core handler with the reconstructed data and options
-        _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, processingOptions);
+        _handleAbsenceProcessing(rowData, rowIndex, requestSheet, logIndices, processingOptions, config);
 
         ui.alert('Reprocessing Initiated', `Processing for row ${rowIndex} has been re-run. Please check the sheet for the updated status.`, ui.ButtonSet.OK);
 
@@ -2682,26 +3099,23 @@ function rerunProcessingOnRow() {
 
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
-  const mainMenu = ui.createMenu('Admin Absence Tools');
-  
-  // Create the "Archiving" submenu
-  const archiveSubMenu = ui.createMenu('Archiving')
-    .addItem('Archive Old Requests (Manual)', 'archiveOldRequests');
+  // We need to get the config to display the site name in the menu
+  const config = getConfig(SpreadsheetApp.getActiveSpreadsheet().getId(), 'SpreadsheetID');
+  const menuName = config ? `Admin Tools (${config.siteID})` : 'Admin Absence Tools';
 
-  // Create the "Triggers" submenu
-  const triggerSubMenu = ui.createMenu('Triggers')
-    .addItem('SETUP ALL TRIGGERS', 'setupAllTriggers')
-    .addItem('DELETE ALL TRIGGERS', 'deleteAllTriggers');
+  const mainMenu = ui.createMenu(menuName);
+  
+  // Create the "Form Updates" submenu
+  const formUpdateSubMenu = ui.createMenu('Form Updates')
+    .addItem('Update This Site\'s Absence Type Dropdowns', 'updateAbsenceTypeDropdownsForCurrentSite')
+    .addItem('Update This Site\'s Admin Form Staff List', 'updateAdminFormStaffListForCurrentSite');
 
   // Build the main menu
-  mainMenu.addItem('Update Admin Form Staff List', 'updateAdminFormStaffList')
-    .addItem('Update Absence Type Dropdowns', 'updateAbsenceTypeDropdowns')
-    .addItem('Flush Column Indices Cache', 'flushColumnIndexCache')
+  mainMenu
+    .addSubMenu(formUpdateSubMenu)
     .addSeparator()
     .addItem('Rerun Processing on Row', 'rerunProcessingOnRow')
     .addSeparator()
-    .addSubMenu(archiveSubMenu)
-    .addSeparator()
-    .addSubMenu(triggerSubMenu)
+    .addItem('Archive Old Requests (Manual)', 'archiveOldRequests')
     .addToUi();
 }
