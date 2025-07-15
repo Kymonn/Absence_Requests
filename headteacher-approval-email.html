@@ -3,80 +3,59 @@
 <head>
     <base target="_top">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; background-color: #f0f2f5; margin: 0; padding: 20px; }
-        .container { width: 100%; max-width: 600px; margin: 0 auto; background-color: #F9F9F9; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow: hidden; }
-        .header { padding: 20px; background-color: #01e890; color: #00434B; text-align: center; }
-        .header h2 { margin: 0; font-size: 24px; }
-        .card { padding: 20px; border-bottom: 1px solid #eeeeee; }
-        .card:last-of-type { border-bottom: none; }
-        .card-title { font-size: 18px; font-weight: bold; color: #004a99; margin-top: 0; margin-bottom: 15px; }
-        .details-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-        .details-table th, .details-table td { padding: 8px; border: 1px solid #ddd; text-align: left; }
-        .details-table th { background-color: #f2f2f2; }
-        .history-block { font-family: monospace; white-space: pre-wrap; word-wrap: break-word; background-color: #f2f2f2; padding: 15px; border-radius: 5px; margin-top: 10px; }
-        .button-container { text-align: center; padding-top: 10px; }
-        .button { display: block; width: 90%; max-width: 300px; margin: 10px auto; padding: 15px; text-align: center; text-decoration: none !important; border-radius: 5px; font-size: 16px; font-weight: bold; color: #ffffff !important; }
-        .approve-paid { background-color: #4CAF50; }
-        .approve-unpaid { background-color: #ff9800; }
-        .reject { background-color: #f44336; }
-        .other { background-color: #607d8b; }
-        .calendar-link { background-color: #1976d2; }
-        .footer-note { font-size: 12px; color: #777; text-align: center; padding: 20px 20px 0 20px; }
-    </style>
 </head>
-<body>
-<div class="container">
-    <div class="header">
-        <h2>Absence Request for Review</h2>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+<div style="width: 90%; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9;">
+    <div style="padding: 10px 20px; background-color: #01e890; color: #00434B; text-align: center; border-radius: 5px 5px 0 0;">
+        <h2 style="margin: 0; font-size: 24px;">Absence Request for Review</h2>
     </div>
 
-    <div class="card">
-        <h3 class="card-title">Request Details</h3>
-        <table class="details-table">
+    <div style="padding: 20px; border-bottom: 1px solid #eeeeee;">
+        <h3 style="font-size: 18px; font-weight: bold; color: #004a99; margin-top: 0; margin-bottom: 15px;">Request Details</h3>
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
           <?!= requestDetailsTableHtml ?>
         </table>
         <? if (evidenceAttached) { ?>
-          <p class="footer-note" style="color: #4CAF50; padding: 10px 0 0 0;"><em>An evidence file has been attached to this email.</em></p>
+          <p style="font-size: 12px; color: #4CAF50; text-align: center; padding: 10px 0 0 0;"><em>An evidence file has been attached to this email.</em></p>
         <? } ?>
         <? if (evidenceError) { ?>
-          <p class="footer-note" style="color: #e60000; padding: 10px 0 0 0;"><em><?= evidenceError ?></em></p>
+          <p style="font-size: 12px; color: #e60000; text-align: center; padding: 10px 0 0 0;"><em><?= evidenceError ?></em></p>
         <? } ?>
     </div>
 
-    <div class="card">
-        <h3 class="card-title">Absence History</h3>
-        <div class="history-block"><?= historySummary ?></div>
-        <p class="footer-note" style="padding: 10px 0 0 0;">Summary of approved absences starting in the 12 months prior to the request date.</p>
+    <div style="padding: 20px; border-bottom: 1px solid #eeeeee;">
+        <h3 style="font-size: 18px; font-weight: bold; color: #004a99; margin-top: 0; margin-bottom: 15px;">Absence History</h3>
+        <div style="font-family: monospace; white-space: pre-wrap; word-wrap: break-word; background-color: #f2f2f2; padding: 15px; border-radius: 5px; margin-top: 10px;"><?= historySummary ?></div>
+        <p style="font-size: 12px; color: #777; text-align: center; padding: 10px 0 0 0;">Summary of approved absences starting in the 12 months prior to the request date.</p>
     </div>
 
-    <div class="card">
-        <h3 class="card-title">Other Absences on This Date</h3>
+    <div style="padding: 20px; border-bottom: 1px solid #eeeeee;">
+        <h3 style="font-size: 18px; font-weight: bold; color: #004a99; margin-top: 0; margin-bottom: 15px;">Other Absences on This Date</h3>
          <p style="margin: 0; padding: 2px 0; font-weight:bold;"><strong style="color: #4CAF50;">Approved:</strong></p>
           <?!= approvedListHtml ?>
           <p style="margin: 10px 0 2px 0; font-weight:bold;"><strong style="color: #ff9800;">Pending Approval:</strong></p>
           <?!= pendingListHtml ?>
     </div>
 
-    <div class="card">
-        <h3 class="card-title">Decision</h3>
+    <div style="padding: 20px; border-bottom: 1px solid #eeeeee;">
+        <h3 style="font-size: 18px; font-weight: bold; color: #004a99; margin-top: 0; margin-bottom: 15px;">Decision</h3>
         <p style="text-align:center; margin-bottom: 20px;">Select an action below. You can add a comment on the next screen.</p>
-        <div class="button-container">
-            <a href="<?= approvePaidUrl ?>" class="button approve-paid">Approve with Pay</a>
-            <a href="<?= approveUnpaidUrl ?>" class="button approve-unpaid">Approve without Pay</a>
-            <a href="<?= rejectUrl ?>" class="button reject">Reject Request</a>
-            <a href="<?= otherUrl ?>" class="button other">Other (Specify)</a>
+        <div style="text-align: center; padding-top: 10px;">
+            <a href="<?= approvePaidUrl ?>" style="display: block; width: 90%; max-width: 300px; margin: 10px auto; padding: 15px; text-align: center; text-decoration: none !important; border-radius: 5px; font-size: 16px; font-weight: bold; color: #ffffff !important; background-color: #4CAF50;">Approve with Pay</a>
+            <a href="<?= approveUnpaidUrl ?>" style="display: block; width: 90%; max-width: 300px; margin: 10px auto; padding: 15px; text-align: center; text-decoration: none !important; border-radius: 5px; font-size: 16px; font-weight: bold; color: #ffffff !important; background-color: #ff9800;">Approve without Pay</a>
+            <a href="<?= rejectUrl ?>" style="display: block; width: 90%; max-width: 300px; margin: 10px auto; padding: 15px; text-align: center; text-decoration: none !important; border-radius: 5px; font-size: 16px; font-weight: bold; color: #ffffff !important; background-color: #f44336;">Reject Request</a>
+            <a href="<?= otherUrl ?>" style="display: block; width: 90%; max-width: 300px; margin: 10px auto; padding: 15px; text-align: center; text-decoration: none !important; border-radius: 5px; font-size: 16px; font-weight: bold; color: #ffffff !important; background-color: #607d8b;">Other (Specify)</a>
         </div>
     </div>
     
-    <div class="card">
-       <h3 class="card-title">Calendar Overview</h3>
-        <div class="button-container">
-             <a href="<?= calendarLink ?>" class="button calendar-link" target="_blank" rel="noopener noreferrer">Open Calendar</a>
+    <div style="padding: 20px; border-bottom: 1px solid #eeeeee;">
+       <h3 style="font-size: 18px; font-weight: bold; color: #004a99; margin-top: 0; margin-bottom: 15px;">Calendar Overview</h3>
+        <div style="text-align: center; padding-top: 10px;">
+             <a href="<?= calendarLink ?>" style="display: block; width: 90%; max-width: 300px; margin: 10px auto; padding: 15px; text-align: center; text-decoration: none !important; border-radius: 5px; font-size: 16px; font-weight: bold; color: #ffffff !important; background-color: #1976d2;" target="_blank" rel="noopener noreferrer">Open Calendar</a>
         </div>
     </div>
 
-    <div class="footer-note">
+    <div style="margin-top: 20px; font-size: 0.9em; color: #777; text-align: center;">
       <p>You may need to log in to your school Google account if prompted.</p>
     </div>
 </div>
