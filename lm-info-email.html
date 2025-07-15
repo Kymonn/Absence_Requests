@@ -2,60 +2,51 @@
 <html>
   <head>
     <base target="_top">
-    <style>
-      body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-      .container { width: 90%; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9; }
-      .header { padding: 10px 20px; background-color: #01e890; color: #00434B; text-align: center; border-radius: 5px 5px 0 0; }
-      .content { padding: 20px; }
-      .details-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-      .details-table th, .details-table td { padding: 8px; border: 1px solid #ddd; text-align: left; }
-      .details-table th { background-color: #f2f2f2; }
-      .footer { margin-top: 20px; font-size: 0.9em; color: #777; text-align: center; }
-    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
   </head>
-  <body>
-    <div class="container">
-      <div class="header">
-        <h2>Absence Request Information</h2>
+  <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+    <div style="width: 90%; max-width: 600px; margin: 20px auto; padding: 20px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9;">
+      <div style="padding: 10px 20px; background-color: #01e890; color: #00434B; text-align: center; border-radius: 5px 5px 0 0;">
+        <h2 style="margin: 0; font-size: 24px;">Absence Request Information</h2>
       </div>
-      <div class="content">
+      <div style="padding: 20px;">
         <p>Dear Line Manager,</p>
         <p><?= infoMessage ?></p>
         <p><strong>Request Details:</strong></p>
-        <table class="details-table">
+        <table style="width: 100%; border-collapse: collapse; margin: 20px 0;">
            <tr>
-            <th>Staff Member</th>
-            <td><?= staffDisplayName ?> (<?= submitterEmail ?>)</td>
+            <th style="padding: 8px; border: 1px solid #ddd; text-align: left; background-color: #f2f2f2;">Staff Member</th>
+            <td style="padding: 8px; border: 1px solid #ddd; text-align: left;"><?= staffDisplayName ?> (<?= submitterEmail ?>)</td>
           </tr>
           <tr>
-            <th>Absence Type</th>
-            <td><?= absenceType ?></td>
+            <th style="padding: 8px; border: 1px solid #ddd; text-align: left; background-color: #f2f2f2;">Absence Type</th>
+            <td style="padding: 8px; border: 1px solid #ddd; text-align: left;"><?= absenceType ?></td>
           </tr>
           <tr>
-            <th>Start</th>
-            <td><?= formattedStart ?></td>
+            <th style="padding: 8px; border: 1px solid #ddd; text-align: left; background-color: #f2f2f2;">Start</th>
+            <td style="padding: 8px; border: 1px solid #ddd; text-align: left;"><?= formattedStart ?></td>
           </tr>
           <tr>
-            <th>End</th>
-            <td><?= formattedEnd ?></td>
+            <th style="padding: 8px; border: 1px solid #ddd; text-align: left; background-color: #f2f2f2;">End</th>
+            <td style="padding: 8px; border: 1px solid #ddd; text-align: left;"><?= formattedEnd ?></td>
           </tr>
            <tr>
-            <th>Calculated Duration</th>
-            <td><?= durationForEmail ?></td>
+            <th style="padding: 8px; border: 1px solid #ddd; text-align: left; background-color: #f2f2f2;">Calculated Duration</th>
+            <td style="padding: 8px; border: 1px solid #ddd; text-align: left;"><?= durationForEmail ?></td>
           </tr>
           <tr>
-            <th>Reason Provided</th>
-            <td><?= reason ?></td>
+            <th style="padding: 8px; border: 1px solid #ddd; text-align: left; background-color: #f2f2f2;">Reason Provided</th>
+            <td style="padding: 8px; border: 1px solid #ddd; text-align: left;"><?= reason ?></td>
           </tr>
           <tr>
-            <th>Log Row Number</th>
-            <td><?= rowIndex ?></td>
+            <th style="padding: 8px; border: 1px solid #ddd; text-align: left; background-color: #f2f2f2;">Request ID</th>
+            <td style="padding: 8px; border: 1px solid #ddd; text-align: left;"><?= requestId ?></td>
           </tr>
         </table>
         <p><b><?= actionMessage ?></b></p>
         <p>Thank you.</p>
       </div>
-       <div class="footer">
+       <div style="margin-top: 20px; font-size: 0.9em; color: #777; text-align: center;">
         <p>This is an automated message. Please do not reply to this email.</p>
       </div>
     </div>
